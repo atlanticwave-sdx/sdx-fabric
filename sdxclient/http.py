@@ -51,6 +51,7 @@ def _http_request(
 
     return {
         "status_code": response.status_code,
+            # If server returns a JSON string, still pass it as data.
         "data": payload,
         "error": None if response.ok else (payload if isinstance(payload, str) else response.reason),
     }

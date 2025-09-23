@@ -1,4 +1,4 @@
-"""Private helpers for selection, listing, and payload shaping."""
+"""Private helpers for listing, setting, and payload shaping (not user-facing)."""
 from typing import Any, Dict, List, Optional
 
 from .http import _http_request
@@ -103,74 +103,100 @@ def _get_selected_endpoints(client: Any) -> Dict[str, Any]:
     }
 
 
-def _get_first_endpoints_html(client: Any, search: Optional[str], limit: int) -> Dict[str, Any]:
-    if client.auth_error:
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-
-    # HTML for humans
-    params_html: Dict[str, Any] = {
-        "format": "html",
+def _get_first_endpoints(client: Any, search: Optional[str], limit: int, *, format: str) -> Dict[str, Any]:
+    """Return HTML or JSON and cache JSON rows for subsequent set_* calls."""
+    params: Dict[str, Any] = {
+        "format": format,
         "fields": "Domain,Device,Port,Status,Port ID,Entities",
         "limit": str(limit),
     }
     if search:
-        params_html["search"] = search
-    html_result = _http_request(
+        params["search"] = search
+
+    accept = "text/html" if format == "html" else "application/json"
+    expect_json = format != "html"
+
+    result = _http_request(
         client.session, client.base_url, "GET", "/available_ports",
-        params=params_html, accept="text/html", timeout=client.timeout, expect_json=False,
+        params=params, accept=accept, timeout=client.timeout, expect_json=expect_json,
     )
-    if html_result["status_code"] != 200:
-        return html_result
 
-    # JSON for cached rows
-    params_json = dict(params_html)
-    params_json["format"] = "json"
-    json_result = _http_request(
-        client.session, client.base_url, "GET", "/available_ports",
-        params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
-    )
-    if json_result["status_code"] == 200 and isinstance(json_result["data"], dict):
-        client._last_first_rows = _extract_rows_list(json_result["data"])
-    else:
-        client._last_first_rows = None
+    # Cache rows when JSON arrived
+    if format == "json" and result["status_code"] == 200 and isinstance(result["data"], (dict, list)):
+        data = result["data"]
+        rows = _extract_rows_list(data)
+        client._last_first_rows = rows
 
-    return html_result
+    elif format == "html":
+        # Also fetch JSON silently to fill cache for set_* calls,
+        # but only if we actually have a bearer token and no auth error.
+        auth_header = client.session.headers.get("Authorization", "")
+        have_bearer = isinstance(auth_header, str) and auth_header.startswith("Bearer ")
+        if have_bearer and not getattr(client, "auth_error", None):
+            params_json = dict(params)
+            params_json["format"] = "json"
+            json_result = _http_request(
+                client.session, client.base_url, "GET", "/available_ports",
+                params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
+            )
+            if json_result["status_code"] == 200 and isinstance(json_result["data"], (dict, list)):
+                client._last_first_rows = _extract_rows_list(json_result["data"])
+            else:
+                client._last_first_rows = None
+        else:
+            client._last_first_rows = None
+
+    return result
 
 
-def _get_second_endpoints_html(client: Any, search: Optional[str], limit: int) -> Dict[str, Any]:
-    if client.auth_error:
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-
-    params_html: Dict[str, Any] = {
-        "format": "html",
+def _get_second_endpoints(client: Any, search: Optional[str], limit: int, *, format: str) -> Dict[str, Any]:
+    """Return HTML or JSON and cache JSON rows for subsequent set_* calls (includes VLANs in Use)."""
+    params: Dict[str, Any] = {
+        "format": format,
         "fields": "Domain,Device,Port,Status,Port ID,Entities,VLANs in Use",
         "limit": str(limit),
     }
     if search:
-        params_html["search"] = search
-    html_result = _http_request(
-        client.session, client.base_url, "GET", "/available_ports",
-        params=params_html, accept="text/html", timeout=client.timeout, expect_json=False,
-    )
-    if html_result["status_code"] != 200:
-        return html_result
+        params["search"] = search
 
-    params_json = dict(params_html)
-    params_json["format"] = "json"
-    json_result = _http_request(
-        client.session, client.base_url, "GET", "/available_ports",
-        params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
-    )
-    if json_result["status_code"] == 200 and isinstance(json_result["data"], dict):
-        client._last_second_rows = _extract_rows_list(json_result["data"])
-    else:
-        client._last_second_rows = None
+    accept = "text/html" if format == "html" else "application/json"
+    expect_json = format != "html"
 
-    return html_result
+    result = _http_request(
+        client.session, client.base_url, "GET", "/available_ports",
+        params=params, accept=accept, timeout=client.timeout, expect_json=expect_json,
+    )
+
+    # Cache rows when JSON arrived
+    if format == "json" and result["status_code"] == 200 and isinstance(result["data"], (dict, list)):
+        data = result["data"]
+        rows = _extract_rows_list(data)
+        client._last_second_rows = rows
+
+    elif format == "html":
+        # Also fetch JSON silently to fill cache for set_* calls,
+        # but only if we actually have a bearer token and no auth error.
+        auth_header = client.session.headers.get("Authorization", "")
+        have_bearer = isinstance(auth_header, str) and auth_header.startswith("Bearer ")
+        if have_bearer and not getattr(client, "auth_error", None):
+            params_json = dict(params)
+            params_json["format"] = "json"
+            json_result = _http_request(
+                client.session, client.base_url, "GET", "/available_ports",
+                params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
+            )
+            if json_result["status_code"] == 200 and isinstance(json_result["data"], (dict, list)):
+                client._last_second_rows = _extract_rows_list(json_result["data"])
+            else:
+                client._last_second_rows = None
+        else:
+            client._last_second_rows = None
+
+    return result
 
 
 def _set_first_endpoint(client: Any, min_filter: Optional[str], prefer_untagged: Optional[bool]) -> Dict[str, Any]:
-    if client.auth_error:
+    if getattr(client, "auth_error", None):
         return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
     if not client._last_first_rows:
         return {"status_code": 0, "data": None, "error": "no first endpoints listed; call get_first_endpoints() first"}
@@ -197,7 +223,7 @@ def _set_first_endpoint(client: Any, min_filter: Optional[str], prefer_untagged:
 
 
 def _set_second_endpoint(client: Any, min_filter: Optional[str], prefer_untagged: Optional[bool]) -> Dict[str, Any]:
-    if client.auth_error:
+    if getattr(client, "auth_error", None):
         return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
     if not client._last_second_rows:
         return {"status_code": 0, "data": None, "error": "no second endpoints listed; call get_second_endpoints() first"}
@@ -224,13 +250,13 @@ def _set_second_endpoint(client: Any, min_filter: Optional[str], prefer_untagged
 
 
 def _set_first_endpoint_by_port_id(client: Any, port_id: str, prefer_untagged: bool) -> Dict[str, Any]:
-    if client.auth_error:
+    if getattr(client, "auth_error", None):
         return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
     info_result = client._fetch_device_info_by_port_id(port_id=port_id)
     if info_result["status_code"] != 200:
         return info_result
     client._last_first_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_first_info, prefer_untagged=bool(prefer_untagged))
+    vlan_choice = _choose_vlan_from_device_info(client._last_first_info, prefer_untagged=prefer_untagged)
     if not vlan_choice:
         return {"status_code": 0, "data": None, "error": "no usable VLAN found for first endpoint"}
     client._first_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}
@@ -238,13 +264,13 @@ def _set_first_endpoint_by_port_id(client: Any, port_id: str, prefer_untagged: b
 
 
 def _set_second_endpoint_by_port_id(client: Any, port_id: str, prefer_untagged: bool) -> Dict[str, Any]:
-    if client.auth_error:
+    if getattr(client, "auth_error", None):
         return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
     info_result = client._fetch_device_info_by_port_id(port_id=port_id)
     if info_result["status_code"] != 200:
         return info_result
     client._last_second_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_second_info, prefer_untagged=bool(prefer_untagged))
+    vlan_choice = _choose_vlan_from_device_info(client._last_second_info, prefer_untagged=prefer_untagged)
     if not vlan_choice:
         return {"status_code": 0, "data": None, "error": "no usable VLAN found for second endpoint"}
     client._second_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}

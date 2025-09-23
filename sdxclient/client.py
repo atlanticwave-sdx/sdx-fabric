@@ -1,51 +1,61 @@
-"""Stateful thin client (user-facing) that delegates private work to helpers."""
-from typing import Any, Dict, List, Optional
+"""Stateful thin client (user-facing) with correct HTML/JSON handling."""
+from typing import Any, Dict, Optional
 import requests
 
+from .config import BASE_URL
 from .fablib_token import _load_fabric_token
 from .http import _http_request
 from .selection_utils import (
     _begin_selection_state,
-    _get_selected_endpoints,
-    _get_first_endpoints_html,
-    _get_second_endpoints_html,
-    _set_first_endpoint,
-    _set_second_endpoint,
-    _set_first_endpoint_by_port_id,
-    _set_second_endpoint_by_port_id,
     _build_l2vpn_payload,
 )
 
 
 class SDXClient:
-    """Stateful, thin HTTP client for SDX routes with guided first/second endpoint selection."""
+    """Thin HTTP client for SDX routes with guided first/second endpoint storage."""
 
-    def __init__(self, base_url: str, timeout: float = 6.0) -> None:
-        if not base_url:
-            raise ValueError("base_url is required")
-        self.base_url = base_url.rstrip("/")
+    def __init__(
+        self,
+        timeout: float = 6.0,
+        *,
+        token: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+    ) -> None:
+        if not BASE_URL:
+            raise ValueError("BASE_URL is required")
+        self.base_url = BASE_URL.rstrip("/")
         self.timeout = timeout
 
-        self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
+        # Reuse provided session or create one
+        self.session = session or requests.Session()
+        self.session.headers.setdefault("Content-Type", "application/json")
 
-        token_result = _load_fabric_token()
-        if token_result["status_code"] != 200:
-            self.auth_error = token_result["error"] or "unable to load FABRIC token"
-        else:
-            self.auth_error = None
-            fabric_token = token_result["data"]
-            self.session.headers.update({"Authorization": f"Bearer {fabric_token}"})
+        # Authorization: prefer explicitly provided token; else try Fablib; else record error
+        self.auth_error: Optional[str] = None
+        bearer = token
+        if bearer is None:
+            token_result = _load_fabric_token()
+            if token_result["status_code"] == 200 and token_result["data"]:
+                bearer = token_result["data"]
+            else:
+                self.auth_error = token_result["error"] or "unable to load FABRIC token"
 
-        # Private state
+        if bearer:
+            self.session.headers["Authorization"] = f"Bearer {bearer}"
+
+        # Simple selection state (set explicitly by the user)
         self._first_endpoint: Optional[Dict[str, Any]] = None
         self._second_endpoint: Optional[Dict[str, Any]] = None
-        self._last_first_rows: Optional[List[Dict[str, Any]]] = None
-        self._last_second_rows: Optional[List[Dict[str, Any]]] = None
-        self._last_first_info: Optional[Dict[str, Any]] = None
-        self._last_second_info: Optional[Dict[str, Any]] = None
 
-    # ---------- User methods: session helpers ----------
+    def set_token(self, token: str) -> Dict[str, Any]:
+        """Inject/replace the Bearer token at runtime."""
+        if not token:
+            return {"status_code": 0, "data": None, "error": "empty token"}
+        self.session.headers["Authorization"] = f"Bearer {token}"
+        self.auth_error = None
+        return {"status_code": 200, "data": True, "error": None}
+
+    # ---------- Session helpers ----------
     def begin_l2vpn_selection(self) -> Dict[str, Any]:
         return _begin_selection_state(self)
 
@@ -53,41 +63,87 @@ class SDXClient:
         return _begin_selection_state(self)
 
     def get_selected_endpoints(self) -> Dict[str, Any]:
-        return _get_selected_endpoints(self)
+        return {
+            "status_code": 200,
+            "data": {"first": self._first_endpoint, "second": self._second_endpoint},
+            "error": None,
+        }
 
-    # ---------- User methods: global available ports ----------
-    def get_available_ports(self, **query: Any) -> Dict[str, Any]:
-        """Pass-through to /available_ports (JSON). Use search='FABRIC', limit=20 to filter by entity."""
+    # ---------- Listings: HTML by default, JSON on request ----------
+    def get_available_ports(
+        self,
+        *,
+        search: Optional[str] = None,
+        limit: int = 20,
+        fields: Optional[str] = None,
+        format: str = "html",  # "html" (default) or "json"
+    ) -> Dict[str, Any]:
+        params: Dict[str, str] = {"format": format, "limit": str(limit)}
+        if search:
+            params["search"] = search
+        if fields:
+            params["fields"] = fields
+        accept = "text/html" if format == "html" else "application/json"
+        expect_json = (format != "html")
         return _http_request(
             self.session, self.base_url, "GET", "/available_ports",
-            params=query or None, accept="application/json",
-            timeout=self.timeout, expect_json=True,
+            params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
         )
 
-    # ---------- User methods: list endpoints ----------
-    def get_first_endpoints(self, search: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
-        """Return HTML (string) and cache JSON rows for subsequent set_* calls."""
-        return _get_first_endpoints_html(self, search, limit)
+    def get_first_endpoints(
+        self,
+        *,
+        search: Optional[str] = None,
+        limit: int = 20,
+        fields: Optional[str] = None,
+        format: str = "html",  # "html" (default) or "json"
+    ) -> Dict[str, Any]:
+        params: Dict[str, str] = {"format": format, "limit": str(limit)}
+        if search:
+            params["search"] = search
+        if fields:
+            params["fields"] = fields
+        accept = "text/html" if format == "html" else "application/json"
+        expect_json = (format != "html")
+        return _http_request(
+            self.session, self.base_url, "GET", "/available_ports",
+            params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
+        )
 
-    def get_second_endpoints(self, search: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
-        """Return HTML (string) and cache JSON rows for subsequent set_* calls. Includes VLANs in Use."""
-        return _get_second_endpoints_html(self, search, limit)
+    def get_second_endpoints(
+        self,
+        *,
+        search: Optional[str] = None,
+        limit: int = 20,
+        fields: Optional[str] = None,
+        format: str = "html",  # "html" (default) or "json"
+    ) -> Dict[str, Any]:
+        params: Dict[str, str] = {"format": format, "limit": str(limit)}
+        if search:
+            params["search"] = search
+        if fields:
+            params["fields"] = fields
+        accept = "text/html" if format == "html" else "application/json"
+        expect_json = (format != "html")
+        return _http_request(
+            self.session, self.base_url, "GET", "/available_ports",
+            params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
+        )
 
-    # ---------- User methods: set endpoints by filter ----------
-    def set_first_endpoint(self, min_filter: Optional[str] = None, prefer_untagged: Optional[bool] = None) -> Dict[str, Any]:
-        return _set_first_endpoint(self, min_filter, prefer_untagged)
+    # ---------- Explicit setters (you provide port_id and vlan) ----------
+    def set_first_endpoint_by_port_id(self, *, port_id: str, vlan: str = "any") -> Dict[str, Any]:
+        if not port_id:
+            return {"status_code": 0, "data": None, "error": "port_id is required"}
+        self._first_endpoint = {"port_id": str(port_id), "vlan": str(vlan)}
+        return {"status_code": 200, "data": self._first_endpoint, "error": None}
 
-    def set_second_endpoint(self, min_filter: Optional[str] = None, prefer_untagged: Optional[bool] = None) -> Dict[str, Any]:
-        return _set_second_endpoint(self, min_filter, prefer_untagged)
+    def set_second_endpoint_by_port_id(self, *, port_id: str, vlan: str = "any") -> Dict[str, Any]:
+        if not port_id:
+            return {"status_code": 0, "data": None, "error": "port_id is required"}
+        self._second_endpoint = {"port_id": str(port_id), "vlan": str(vlan)}
+        return {"status_code": 200, "data": self._second_endpoint, "error": None}
 
-    # ---------- User methods: set endpoints by explicit Port ID ----------
-    def set_first_endpoint_by_port_id(self, *, port_id: str, prefer_untagged: bool = False) -> Dict[str, Any]:
-        return _set_first_endpoint_by_port_id(self, port_id, prefer_untagged)
-
-    def set_second_endpoint_by_port_id(self, *, port_id: str, prefer_untagged: bool = False) -> Dict[str, Any]:
-        return _set_second_endpoint_by_port_id(self, port_id, prefer_untagged)
-
-    # ---------- User methods: preview & create ----------
+    # ---------- Preview & create ----------
     def preview_l2vpn_payload(self, *, name: str, notifications: str) -> Dict[str, Any]:
         if not self._first_endpoint or not self._second_endpoint:
             return {"status_code": 0, "data": None, "error": "missing selection: first and/or second endpoint"}
@@ -109,11 +165,12 @@ class SDXClient:
             timeout=self.timeout, expect_json=True,
         )
 
-    # ---------- User methods: raw mirrors ----------
+    # ---------- Raw JSON mirrors ----------
     def get_l2vpns(self, **query: Any) -> Dict[str, Any]:
+        query.setdefault("format", "json")
         return _http_request(
             self.session, self.base_url, "GET", "/l2vpns",
-            params=query or None, accept="application/json",
+            params=query, accept="application/json",
             timeout=self.timeout, expect_json=True,
         )
 
@@ -134,14 +191,5 @@ class SDXClient:
         return _http_request(
             self.session, self.base_url, "DELETE", f"/l2vpn/{service_id}",
             accept="application/json", timeout=self.timeout, expect_json=True,
-        )
-
-    # ---------- Private method: now port_id-only ----------
-    def _fetch_device_info_by_port_id(self, *, port_id: str) -> Dict[str, Any]:
-        params = {"port_id": port_id, "format": "json"}
-        return _http_request(
-            self.session, self.base_url, "GET", "/device_info",
-            params=params, accept="application/json",
-            timeout=self.timeout, expect_json=True,
         )
 
