@@ -1,4 +1,4 @@
-"""Stateful thin client (user-facing) with correct HTML/JSON handling."""
+"""Stateful thin client (user-facing) aligned with AW-SDX 2.0 Topology Data Model."""
 from typing import Any, Dict, Optional
 import requests
 
@@ -8,11 +8,16 @@ from .http import _http_request
 from .selection_utils import (
     _begin_selection_state,
     _build_l2vpn_payload,
+    _choose_vlan_from_device_info,
+    _extract_rows_list,
+    _find_matching_rows,           # <-- use new matcher
+    _list_available_ports_json,
+    _fetch_device_info_by_port_id,
 )
 
 
 class SDXClient:
-    """Thin HTTP client for SDX routes with guided first/second endpoint storage."""
+    """Thin HTTP client for SDX routes with guided endpoint selection."""
 
     def __init__(
         self,
@@ -32,18 +37,18 @@ class SDXClient:
 
         # Authorization: prefer explicitly provided token; else try Fablib; else record error
         self.auth_error: Optional[str] = None
-        bearer = token
-        if bearer is None:
+        bearer_token = token
+        if bearer_token is None:
             token_result = _load_fabric_token()
             if token_result["status_code"] == 200 and token_result["data"]:
-                bearer = token_result["data"]
+                bearer_token = token_result["data"]
             else:
                 self.auth_error = token_result["error"] or "unable to load FABRIC token"
 
-        if bearer:
-            self.session.headers["Authorization"] = f"Bearer {bearer}"
+        if bearer_token:
+            self.session.headers["Authorization"] = f"Bearer {bearer_token}"
 
-        # Simple selection state (set explicitly by the user)
+        # Selection state
         self._first_endpoint: Optional[Dict[str, Any]] = None
         self._second_endpoint: Optional[Dict[str, Any]] = None
 
@@ -69,79 +74,122 @@ class SDXClient:
             "error": None,
         }
 
-    # ---------- Listings: HTML by default, JSON on request ----------
+    # ---------- Listings (pass-through) ----------
     def get_available_ports(
         self,
         *,
         search: Optional[str] = None,
-        limit: int = 20,
+        filter: Optional[str] = None,
+        limit: Optional[int] = None,
         fields: Optional[str] = None,
         format: str = "html",  # "html" (default) or "json"
     ) -> Dict[str, Any]:
-        params: Dict[str, str] = {"format": format, "limit": str(limit)}
-        if search:
+        params: Dict[str, str] = {"format": format}
+        if limit:
+            params["limit"] = str(limit)
+        if filter:
+            params["filter"] = filter
+        elif search:
             params["search"] = search
         if fields:
             params["fields"] = fields
+
         accept = "text/html" if format == "html" else "application/json"
-        expect_json = (format != "html")
+        expect_json = format != "html"
         return _http_request(
             self.session, self.base_url, "GET", "/available_ports",
             params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
         )
 
-    def get_first_endpoints(
+    # ---------- Unified endpoint setter ----------
+    def set_endpoint(
         self,
         *,
+        endpoint_position: str,         # "first" or "second"
+        filter: Optional[str] = None,
         search: Optional[str] = None,
-        limit: int = 20,
-        fields: Optional[str] = None,
-        format: str = "html",  # "html" (default) or "json"
+        port_id: Optional[str] = None,
+        vlan: Optional[str] = None,
+        prefer_untagged: bool = False,
     ) -> Dict[str, Any]:
-        params: Dict[str, str] = {"format": format, "limit": str(limit)}
-        if search:
-            params["search"] = search
-        if fields:
-            params["fields"] = fields
-        accept = "text/html" if format == "html" else "application/json"
-        expect_json = (format != "html")
-        return _http_request(
-            self.session, self.base_url, "GET", "/available_ports",
-            params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
-        )
+        """
+        One-shot setter:
+          - port_id path: fetch device_info → VLAN → set
+          - filter/search path: /available_ports JSON → find matches → device_info → VLAN → set
 
-    def get_second_endpoints(
-        self,
-        *,
-        search: Optional[str] = None,
-        limit: int = 20,
-        fields: Optional[str] = None,
-        format: str = "html",  # "html" (default) or "json"
-    ) -> Dict[str, Any]:
-        params: Dict[str, str] = {"format": format, "limit": str(limit)}
-        if search:
-            params["search"] = search
-        if fields:
-            params["fields"] = fields
-        accept = "text/html" if format == "html" else "application/json"
-        expect_json = (format != "html")
-        return _http_request(
-            self.session, self.base_url, "GET", "/available_ports",
-            params=params, accept=accept, timeout=self.timeout, expect_json=expect_json,
-        )
+        Rules:
+          - If both filter and search are provided, filter wins.
+          - If multiple rows match the filter/search, return an ambiguity error.
+          - Port URN is always taken from "id".
+        """
+        normalized_position = (endpoint_position or "").strip().lower()
+        if normalized_position not in ("first", "second"):
+            return {"status_code": 0, "data": None, "error": 'endpoint_position must be "first" or "second"'}
 
-    # ---------- Explicit setters (you provide port_id and vlan) ----------
-    def set_first_endpoint_by_port_id(self, *, port_id: str, vlan: str = "any") -> Dict[str, Any]:
-        if not port_id:
-            return {"status_code": 0, "data": None, "error": "port_id is required"}
-        self._first_endpoint = {"port_id": str(port_id), "vlan": str(vlan)}
-        return {"status_code": 200, "data": self._first_endpoint, "error": None}
+        # ---------- Direct Port ID path ----------
+        if port_id:
+            device_info_result = _fetch_device_info_by_port_id(self, port_id=port_id)
+            if device_info_result["status_code"] != 200:
+                return device_info_result
 
-    def set_second_endpoint_by_port_id(self, *, port_id: str, vlan: str = "any") -> Dict[str, Any]:
-        if not port_id:
-            return {"status_code": 0, "data": None, "error": "port_id is required"}
-        self._second_endpoint = {"port_id": str(port_id), "vlan": str(vlan)}
-        return {"status_code": 200, "data": self._second_endpoint, "error": None}
+            chosen_vlan = vlan or _choose_vlan_from_device_info(
+                device_info_result["data"], prefer_untagged=prefer_untagged
+            )
+            if not chosen_vlan:
+                return {"status_code": 0, "data": None, "error": "no usable VLAN found"}
+
+            endpoint_data = {"port_id": str(port_id), "vlan": str(chosen_vlan)}
+            if normalized_position == "first":
+                self._first_endpoint = endpoint_data
+            else:
+                self._second_endpoint = endpoint_data
+            return {"status_code": 200, "data": endpoint_data, "error": None}
+
+        # ---------- Filter / Search path ----------
+        query_text = filter or search
+        if not query_text:
+            return {"status_code": 0, "data": None, "error": "either port_id or filter/search is required"}
+
+        use_filter = bool(filter)
+        listing_result = _list_available_ports_json(self, query_text, use_filter=use_filter)
+        if listing_result["status_code"] != 200 or not isinstance(listing_result["data"], (dict, list)):
+            return {"status_code": 0, "data": None, "error": listing_result.get("error") or "unable to list endpoints"}
+
+        rows = _extract_rows_list(listing_result["data"])
+        matches = _find_matching_rows(rows, query_text)
+
+        if not matches:
+            return {"status_code": 0, "data": None, "error": f"no matching {normalized_position} endpoint"}
+
+        if len(matches) > 1:
+            # Return a concise ambiguity message plus a short list of candidate URNs
+            candidate_ids = [str(row.get("id") or "") for row in matches[:8]]
+            return {
+                "status_code": 0,
+                "data": {"candidates": candidate_ids},
+                "error": f"ambiguous filter/search matched {len(matches)} ports; refine or use exact port_id",
+            }
+
+        chosen_row = matches[0]
+        chosen_port_id = str(chosen_row.get("id") or "").strip()
+        if not chosen_port_id:
+            return {"status_code": 0, "data": None, "error": "row missing Port URN in 'id'"}
+
+        device_info_result = _fetch_device_info_by_port_id(self, port_id=chosen_port_id)
+        if device_info_result["status_code"] != 200:
+            return device_info_result
+
+        chosen_vlan = vlan or _choose_vlan_from_device_info(device_info_result["data"], prefer_untagged=prefer_untagged)
+        if not chosen_vlan:
+            return {"status_code": 0, "data": None, "error": "no usable VLAN found"}
+
+        endpoint_data = {"port_id": chosen_port_id, "vlan": str(chosen_vlan)}
+        if normalized_position == "first":
+            self._first_endpoint = endpoint_data
+        else:
+            self._second_endpoint = endpoint_data
+
+        return {"status_code": 200, "data": endpoint_data, "error": None}
 
     # ---------- Preview & create ----------
     def preview_l2vpn_payload(self, *, name: str, notifications: str) -> Dict[str, Any]:

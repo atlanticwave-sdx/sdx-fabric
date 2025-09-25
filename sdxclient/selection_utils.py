@@ -1,70 +1,115 @@
-"""Private helpers for listing, setting, and payload shaping (not user-facing)."""
-from typing import Any, Dict, List, Optional
+# selection_utils.py
+"""Helpers for SDXClient: endpoint selection and L2VPN payload building.
 
+Contract:
+- Listing:
+  - /available_ports (JSON) with either ?filter= (plain substring) or ?search= (key:value).
+  - If both are present, filter wins (caller decides which to send).
+- Matching:
+  - Rows are expected to include spec fields: id, name, node, entities, status, state.
+  - Ambiguity policy (for filter/search text): the caller may ask for all matches.
+- Device info:
+  - /device_info?port_id=...&format=json returns a single-port view used to pick a VLAN.
+- Payload:
+  - Build payload including both port_id and vlan for each endpoint.
+"""
+
+from typing import Any, Dict, List, Optional
 from .http import _http_request
 
 
-# ------------------ Pure helpers (no network) ------------------
+# ---- State ----
 
-def _extract_rows_list(payload: Any) -> List[Dict[str, Any]]:
-    """Extract table rows from common JSON shapes."""
+def _begin_selection_state(client=None) -> Dict[str, Any]:
+    """Return a reset state dictionary for endpoint selection."""
+    # client is unused; accepted for symmetry with calls from SDXClient
+    return {"first": None, "second": None}
+
+
+# ---- Available ports ----
+
+def _list_available_ports_json(client, query_text: Optional[str], *, use_filter: bool) -> Dict[str, Any]:
+    """Fetch /available_ports with JSON output, using either ?filter= or ?search=."""
+    params: Dict[str, str] = {"format": "json"}
+    if query_text:
+        if use_filter:
+            params["filter"] = query_text
+        else:
+            params["search"] = query_text
+    return _http_request(
+        client.session, client.base_url, "GET", "/available_ports",
+        params=params, accept="application/json",
+        timeout=client.timeout, expect_json=True,
+    )
+
+
+def _extract_rows_list(payload: Any) -> List[dict]:
+    """Extract the list of port rows from the /available_ports JSON response."""
+    if isinstance(payload, dict):
+        return payload.get("ports") or []
     if isinstance(payload, list):
         return payload
-    if isinstance(payload, dict):
-        for key in ("data", "rows", "items", "results"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return value
     return []
 
 
-def _pick_row(rows: List[Dict[str, Any]], *, min_filter: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Pick the first matching row by a simple substring filter over common columns."""
-    if not rows:
-        return None
-    if not min_filter:
-        return rows[0]
-    needle = min_filter.lower().strip()
-    columns = ("Domain", "Device", "Port", "Port ID", "Entities", "Status", "device", "port_id", "id")
+def _find_matching_rows(rows: List[dict], search_text: str) -> List[dict]:
+    """
+    Return all rows that match the search_text across spec fields.
+    Case-insensitive substring match across: id, name, node, entities, status, state.
+    """
+    if not search_text:
+        return []
+    normalized_search = search_text.strip().lower()
+    matches: List[dict] = []
     for row in rows:
-        haystack = " ".join(str(row.get(k, "")) for k in columns).lower()
-        if needle in haystack:
-            return row
-    return None
+        for field_name in ("id", "name", "node", "entities", "status", "state"):
+            field_value = row.get(field_name)
+            if isinstance(field_value, list):
+                if any(normalized_search in str(entry).lower() for entry in field_value):
+                    matches.append(row)
+                    break
+            elif isinstance(field_value, str) and normalized_search in field_value.lower():
+                matches.append(row)
+                break
+    return matches
 
 
-def _choose_vlan_from_device_info(info: Any, *, prefer_untagged: bool) -> Optional[str]:
-    """Choose a VLAN from a device_info response (strings or ints accepted)."""
-    if not isinstance(info, dict):
+# ---- Device info ----
+
+def _fetch_device_info_by_port_id(client, port_id: str) -> Dict[str, Any]:
+    """Fetch device information for a specific port URN (port_id)."""
+    params: Dict[str, str] = {"port_id": port_id, "format": "json"}
+    return _http_request(
+        client.session, client.base_url, "GET", "/device_info",
+        params=params, accept="application/json",
+        timeout=client.timeout, expect_json=True,
+    )
+
+
+def _choose_vlan_from_device_info(device_info: Dict[str, Any], prefer_untagged: bool = False) -> Optional[str]:
+    """
+    Pick a VLAN from the /device_info response:
+    - If prefer_untagged and 'untagged' is available, return it.
+    - Otherwise return the first available VLAN token.
+    """
+    ports = device_info.get("ports") or []
+    if not ports:
         return None
 
-    # 1) Lists of options
-    for key in ("available_vlans", "vlans", "vlans_available", "vlan_options"):
-        value = info.get(key)
-        if isinstance(value, list) and value:
-            normalized = [str(v) for v in value if v is not None]
-            if prefer_untagged and any(v.lower() == "untagged" for v in normalized):
-                return "untagged"
-            for v in normalized:
-                if v.isdigit():
-                    return v
-            return normalized[0]
+    # Expect one port when filtered by port_id
+    port_row = ports[0]
+    available_vlans_field = str(port_row.get("VLANs Available") or "").lower()
+    if not available_vlans_field or available_vlans_field == "none":
+        return None
 
-    # 2) Single suggestion
-    for key in ("suggested_vlan", "vlan", "default_vlan"):
-        value = info.get(key)
-        if value is not None:
-            return str(value)
+    if prefer_untagged and "untagged" in available_vlans_field:
+        return "untagged"
 
-    # 3) Nested dicts
-    for key in ("port", "endpoint", "details"):
-        nested = info.get(key)
-        vlan = _choose_vlan_from_device_info(nested, prefer_untagged=prefer_untagged)
-        if vlan:
-            return vlan
+    first_token = available_vlans_field.split(",")[0].strip()
+    return first_token if first_token else None
 
-    return None
 
+# ---- Payload ----
 
 def _build_l2vpn_payload(
     *,
@@ -73,206 +118,13 @@ def _build_l2vpn_payload(
     first_endpoint: Dict[str, Any],
     second_endpoint: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Build an L2VPN payload including port_id and vlan from both endpoints."""
     return {
         "name": name,
+        "notifications": [notifications],
         "endpoints": [
             {"port_id": first_endpoint["port_id"], "vlan": first_endpoint["vlan"]},
             {"port_id": second_endpoint["port_id"], "vlan": second_endpoint["vlan"]},
         ],
-        "Notifications": notifications,
     }
-
-
-# --------------- Stateful helpers (operate on client) ----------------
-
-def _begin_selection_state(client: Any) -> Dict[str, Any]:
-    client._first_endpoint = None
-    client._second_endpoint = None
-    client._last_first_rows = None
-    client._last_second_rows = None
-    client._last_first_info = None
-    client._last_second_info = None
-    return {"status_code": 200, "data": True, "error": None}
-
-
-def _get_selected_endpoints(client: Any) -> Dict[str, Any]:
-    return {
-        "status_code": 200,
-        "data": {"first": client._first_endpoint, "second": client._second_endpoint},
-        "error": None,
-    }
-
-
-def _get_first_endpoints(client: Any, search: Optional[str], limit: int, *, format: str) -> Dict[str, Any]:
-    """Return HTML or JSON and cache JSON rows for subsequent set_* calls."""
-    params: Dict[str, Any] = {
-        "format": format,
-        "fields": "Domain,Device,Port,Status,Port ID,Entities",
-        "limit": str(limit),
-    }
-    if search:
-        params["search"] = search
-
-    accept = "text/html" if format == "html" else "application/json"
-    expect_json = format != "html"
-
-    result = _http_request(
-        client.session, client.base_url, "GET", "/available_ports",
-        params=params, accept=accept, timeout=client.timeout, expect_json=expect_json,
-    )
-
-    # Cache rows when JSON arrived
-    if format == "json" and result["status_code"] == 200 and isinstance(result["data"], (dict, list)):
-        data = result["data"]
-        rows = _extract_rows_list(data)
-        client._last_first_rows = rows
-
-    elif format == "html":
-        # Also fetch JSON silently to fill cache for set_* calls,
-        # but only if we actually have a bearer token and no auth error.
-        auth_header = client.session.headers.get("Authorization", "")
-        have_bearer = isinstance(auth_header, str) and auth_header.startswith("Bearer ")
-        if have_bearer and not getattr(client, "auth_error", None):
-            params_json = dict(params)
-            params_json["format"] = "json"
-            json_result = _http_request(
-                client.session, client.base_url, "GET", "/available_ports",
-                params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
-            )
-            if json_result["status_code"] == 200 and isinstance(json_result["data"], (dict, list)):
-                client._last_first_rows = _extract_rows_list(json_result["data"])
-            else:
-                client._last_first_rows = None
-        else:
-            client._last_first_rows = None
-
-    return result
-
-
-def _get_second_endpoints(client: Any, search: Optional[str], limit: int, *, format: str) -> Dict[str, Any]:
-    """Return HTML or JSON and cache JSON rows for subsequent set_* calls (includes VLANs in Use)."""
-    params: Dict[str, Any] = {
-        "format": format,
-        "fields": "Domain,Device,Port,Status,Port ID,Entities,VLANs in Use",
-        "limit": str(limit),
-    }
-    if search:
-        params["search"] = search
-
-    accept = "text/html" if format == "html" else "application/json"
-    expect_json = format != "html"
-
-    result = _http_request(
-        client.session, client.base_url, "GET", "/available_ports",
-        params=params, accept=accept, timeout=client.timeout, expect_json=expect_json,
-    )
-
-    # Cache rows when JSON arrived
-    if format == "json" and result["status_code"] == 200 and isinstance(result["data"], (dict, list)):
-        data = result["data"]
-        rows = _extract_rows_list(data)
-        client._last_second_rows = rows
-
-    elif format == "html":
-        # Also fetch JSON silently to fill cache for set_* calls,
-        # but only if we actually have a bearer token and no auth error.
-        auth_header = client.session.headers.get("Authorization", "")
-        have_bearer = isinstance(auth_header, str) and auth_header.startswith("Bearer ")
-        if have_bearer and not getattr(client, "auth_error", None):
-            params_json = dict(params)
-            params_json["format"] = "json"
-            json_result = _http_request(
-                client.session, client.base_url, "GET", "/available_ports",
-                params=params_json, accept="application/json", timeout=client.timeout, expect_json=True,
-            )
-            if json_result["status_code"] == 200 and isinstance(json_result["data"], (dict, list)):
-                client._last_second_rows = _extract_rows_list(json_result["data"])
-            else:
-                client._last_second_rows = None
-        else:
-            client._last_second_rows = None
-
-    return result
-
-
-def _set_first_endpoint(client: Any, min_filter: Optional[str], prefer_untagged: Optional[bool]) -> Dict[str, Any]:
-    if getattr(client, "auth_error", None):
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-    if not client._last_first_rows:
-        return {"status_code": 0, "data": None, "error": "no first endpoints listed; call get_first_endpoints() first"}
-
-    chosen = _pick_row(client._last_first_rows, min_filter=min_filter)
-    if not chosen:
-        return {"status_code": 0, "data": None, "error": "no matching first endpoint"}
-
-    port_id = str(chosen.get("Port ID") or chosen.get("port_id") or chosen.get("id") or "").strip()
-    if not port_id:
-        return {"status_code": 0, "data": None, "error": "row missing Port ID"}
-
-    info_result = client._fetch_device_info_by_port_id(port_id=port_id)
-    if info_result["status_code"] != 200:
-        return info_result
-
-    client._last_first_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_first_info, prefer_untagged=bool(prefer_untagged))
-    if not vlan_choice:
-        return {"status_code": 0, "data": None, "error": "no usable VLAN found for first endpoint"}
-
-    client._first_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}
-    return {"status_code": 200, "data": client._first_endpoint, "error": None}
-
-
-def _set_second_endpoint(client: Any, min_filter: Optional[str], prefer_untagged: Optional[bool]) -> Dict[str, Any]:
-    if getattr(client, "auth_error", None):
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-    if not client._last_second_rows:
-        return {"status_code": 0, "data": None, "error": "no second endpoints listed; call get_second_endpoints() first"}
-
-    chosen = _pick_row(client._last_second_rows, min_filter=min_filter)
-    if not chosen:
-        return {"status_code": 0, "data": None, "error": "no matching second endpoint"}
-
-    port_id = str(chosen.get("Port ID") or chosen.get("port_id") or chosen.get("id") or "").strip()
-    if not port_id:
-        return {"status_code": 0, "data": None, "error": "row missing Port ID"}
-
-    info_result = client._fetch_device_info_by_port_id(port_id=port_id)
-    if info_result["status_code"] != 200:
-        return info_result
-
-    client._last_second_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_second_info, prefer_untagged=bool(prefer_untagged))
-    if not vlan_choice:
-        return {"status_code": 0, "data": None, "error": "no usable VLAN found for second endpoint"}
-
-    client._second_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}
-    return {"status_code": 200, "data": client._second_endpoint, "error": None}
-
-
-def _set_first_endpoint_by_port_id(client: Any, port_id: str, prefer_untagged: bool) -> Dict[str, Any]:
-    if getattr(client, "auth_error", None):
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-    info_result = client._fetch_device_info_by_port_id(port_id=port_id)
-    if info_result["status_code"] != 200:
-        return info_result
-    client._last_first_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_first_info, prefer_untagged=prefer_untagged)
-    if not vlan_choice:
-        return {"status_code": 0, "data": None, "error": "no usable VLAN found for first endpoint"}
-    client._first_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}
-    return {"status_code": 200, "data": client._first_endpoint, "error": None}
-
-
-def _set_second_endpoint_by_port_id(client: Any, port_id: str, prefer_untagged: bool) -> Dict[str, Any]:
-    if getattr(client, "auth_error", None):
-        return {"status_code": 0, "data": None, "error": f"auth not ready: {client.auth_error}"}
-    info_result = client._fetch_device_info_by_port_id(port_id=port_id)
-    if info_result["status_code"] != 200:
-        return info_result
-    client._last_second_info = info_result["data"] if isinstance(info_result["data"], dict) else None
-    vlan_choice = _choose_vlan_from_device_info(client._last_second_info, prefer_untagged=prefer_untagged)
-    if not vlan_choice:
-        return {"status_code": 0, "data": None, "error": "no usable VLAN found for second endpoint"}
-    client._second_endpoint = {"port_id": port_id, "vlan": str(vlan_choice)}
-    return {"status_code": 200, "data": client._second_endpoint, "error": None}
 
