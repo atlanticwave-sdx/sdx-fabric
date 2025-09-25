@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdxclient"
+version = "0.1.0"
+description = "Thin Python client for SDX routes with guided endpoint selection for L2VPN creation"
+readme = "README.md"
+authors = [
+  { name="Luis Vera", email="lmarinve@fiu.edu" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+dependencies = [
+  "requests>=2.28",
+  "fabrictestbed-extensions>=1.5.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sdxclient"]
+
+[project.urls]
+Homepage = "https://github.com/atlanticwave-sdx/sdx-fabric"
+Issues = "https://github.com/atlanticwave-sdx/sdx-fabric/issues"
+
