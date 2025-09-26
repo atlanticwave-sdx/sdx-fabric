@@ -75,6 +75,18 @@ class SDXClient:
         }
 
     # ---------- Listings (pass-through) ----------
+    def get_topology(self) -> Dict[str, Any]:
+        """Fetch raw topology via the API route using the client's Bearer token."""
+        return _http_request(
+            self.session,
+            self.base_url,
+            "GET",
+            "/topology",
+            accept="application/json",
+            timeout=self.timeout,
+            expect_json=True,
+        )
+
     def get_available_ports(
         self,
         *,
@@ -190,6 +202,24 @@ class SDXClient:
             self._second_endpoint = endpoint_data
 
         return {"status_code": 200, "data": endpoint_data, "error": None}
+
+    # ---------- VLAN availability (pass-throughs) ----------
+    def get_all_vlans_available(self) -> Dict[str, Any]:
+        """Bulk VLAN availability for all ports."""
+        return _http_request(
+            self.session, self.base_url, "GET", "/available_vlans",
+            params={"format": "json"}, accept="application/json",
+            timeout=self.timeout, expect_json=True,
+        )
+
+    def get_port_vlans_available(self, port_id: str) -> Dict[str, Any]:
+        """VLAN availability for a single port."""
+        params: Dict[str, str] = {"format": "json", "port_id": str(port_id)}
+        return _http_request(
+            self.session, self.base_url, "GET", "/available_vlans",
+            params=params, accept="application/json",
+            timeout=self.timeout, expect_json=True,
+        )
 
     # ---------- Preview & create ----------
     def preview_l2vpn_payload(self, *, name: str, notifications: str) -> Dict[str, Any]:
