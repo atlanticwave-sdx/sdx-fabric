@@ -1,8 +1,9 @@
 # SDXClient
 
-A thin Python client that wraps the SDX HTTP routes, loads the FABRIC token automatically, and guides you through creating an **L2VPN** by selecting endpoints.  
+A thin Python client that wraps the SDX HTTP routes, stages L2VPN payload metadata, guides endpoint selection, and keeps responses consistent.
 
-It mirrors the existing API (available ports, device info, L2VPN CRUD), keeps response formats consistent, and maintains only the minimal state needed to assemble the final L2VPN payload.
+- Returns dict everywhere: {"status_code": int, "data": Any, "error": Optional[str]}
+- No user-facing tracebacks; friendly errors only.
 
 ---
 
@@ -16,6 +17,15 @@ It mirrors the existing API (available ports, device info, L2VPN CRUD), keeps re
 - VLAN choice is derived from `/device_info`; supports preferring **untagged**.  
 - Consistent return shape across all methods:  
 
+## Initialization
+
+```python
+from sdxclient import SDXClient
+client = SDXClient(timeout=6.0)            # tries FABRIC token
+```
+
+## Return Shape (always)
+
 ```python
 {
   "status_code": int,
@@ -24,6 +34,8 @@ It mirrors the existing API (available ports, device info, L2VPN CRUD), keeps re
 }
 ```
 
+- status_code == 0 → client-side validation / network failure
+- status_code >= 400 → server-side error (with best-effort error message)
 ---
 
 ## Requirements
@@ -35,57 +47,169 @@ It mirrors the existing API (available ports, device info, L2VPN CRUD), keeps re
 
 ---
 
-## Guided Flow (Step by Step)
+## Core Read APIs (pass-through)
 
-### 1. Explore available ports
 ```python
-client.get_available_ports(search="FABRIC", limit=20)
+client.get_topology()
+client.get_available_ports(search=None, filter=None, limit=None, fields=None, format="html|json")
+client.get_all_vlans_available()
+client.get_port_vlans_available(port_id)
 ```
 
----
+**Notes:**
+- filter wins over search.
+- format="html" returns HTML table (string). format="json" returns structured JSON.
 
-### 2. Begin a new selection
+## Selection Flow (endpoints)
+
+```python
+client.begin_l2vpn_selection()
+client.set_endpoint(
+    endpoint_position="first" | "second",
+    filter=None, search=None,
+    port_id=None, vlan=None,
+    prefer_untagged=False
+)
+client.get_selected_endpoints()
+```
+
+**Rules:**
+- Use port_id for precise selection, or filter/search to resolve a single row.
+- If multiple candidates match, you get an ambiguity error with a short candidate list.
+- VLAN availability is checked inline against /available_vlans.
+
+## L2VPN Payload: Stage → Preview → Create
+
+**1) Stage payload metadata once**
+
+```python
+client.set_l2vpn_payload(
+    name="project-alpha-l2vpn",
+    notifications=["ops@example.org", "noc@example.org"]
+)
+```
+
+- Validates name (non-empty, ≤ 50 chars).
+- Validates notifications (1–10 emails; str input is normalized to a list).
+
+**2) Build payload** locally (no network)
+```python
+payload_result = client.get_l2vpn_payload()
+# -> {"name": "...", "notifications": [...], "endpoints": [{...}, {...}]}
+```
+
+- Requires both endpoints to be selected and metadata to be staged.
+- Re-validates endpoint shape and rejects same-VLAN per policy (see “VLAN Rules”).
+- No availability calls here.
+
+**3) Preview payload with availability checks**
+```python
+preview_result = client.preview_l2vpn_payload()
+# Re-checks VLAN availability via /available_vlans for both endpoints.
+```
+
+**4) Create L2VPN (uses previewed payload)**
+```python
+create_result = client.create_l2vpn_from_selection()
+```
+
+- Uses the staged name/notifications + selected endpoints.
+- Performs preview internally first (includes availability checks).
+- No need to pass name/notifications again here.
+
+**CRUD Mirrors**
+- client.get_l2vpns(**query)
+- client.get_l2vpn(service_id)
+- client.update_l2vpn(service_id, **fields)
+- client.delete_l2vpn(service_id)
+
+## Minimal End-to-End Example
+```python
+from sdxclient import SDXClient
+client = SDXClient()
+```
+
+**1) Start fresh**
 ```python
 client.begin_l2vpn_selection()
 ```
 
----
-
-### 3. Set the first endpoint
-By filter:
+**2) Choose endpoints**
 ```python
-client.set_endpoint(endpoint_position="first", min_filter="SW17:7")
+client.set_endpoint(endpoint_position="first",  filter="SW17:7")
+client.set_endpoint(endpoint_position="second", filter="SW17:27", prefer_untagged=True)
 ```
 
-By exact Port ID:
+**3) Stage metadata once**
 ```python
-client.set_endpoint(endpoint_position="first", port_id="urn:sdx:port:amlight.net:MIA-MI1-SW17:7")
+client.set_l2vpn_payload(
+    name="proj-alpha-mia-test",
+    notifications="noc@example.org"
+)
 ```
 
----
-
-### 4. Set the second endpoint
-By filter (with VLAN preference):
+**4) Optional: local payload** (no network)
 ```python
-client.set_endpoint(endpoint_position="second", min_filter="SW17:27", prefer_untagged=True)
+local_payload = client.get_l2vpn_payload()
 ```
 
-By exact Port ID:
+**5) Preview with availability checks**
 ```python
-client.set_endpoint(endpoint_position="second", port_id="urn:sdx:port:amlight.net:MIA-MI1-SW17:27", prefer_untagged=True)
+preview = client.preview_l2vpn_payload()
 ```
 
----
-
-### 5. Preview the payload
+**6) Create**
 ```python
-client.preview_l2vpn_payload(name="test-sdxlib-mia", notifications="lmarinve@fiu.edu")
+created = client.create_l2vpn_from_selection()
 ```
 
----
-
-### 6. Create the L2VPN
+## Error Examples (friendly)
 ```python
-client.create_l2vpn_from_selection(name="test-sdxlib-mia", notifications="lmarinve@fiu.edu")
+client.get_port_vlans_available(None)
+# {'status_code': 0, 'data': None, 'error': 'missing required parameter(s): port_id'}
+
+client.set_endpoint(endpoint_position="first", filter="too-broad")
+# {'status_code': 0, 'data': {'candidates': [...]}, 'error': 'ambiguous filter/search matched ...'}
+
+client.get_l2vpn_payload()   # without staging metadata
+# {'status_code': 0, 'data': None, 'error': 'missing L2VPN name (set via set_l2vpn_payload)'}
 ```
 
+## VLAN Validation Rules for L2VPN
+
+**Allowed forms**
+- Numeric VLANs: 1..4095
+- Ranges: A:B where 1 ≤ A < B ≤ 4095
+- Keywords: any, untagged
+- **(all is not allowed)**
+
+## Mixing rules
+
+- Numeric ↔ Range (e.g., 200 with 100:300)
+- any ↔ untagged
+- any/untagged mixed with numeric/range
+
+## Rejection rules
+- all mixed with anything (since all is not allowed at all)
+- Same numeric VLAN twice (e.g., 200 & 200)
+- Same exact range twice (e.g., 100:200 & 100:200)
+
+## Tips
+
+- Prefer format="json" for machine workflows; parse ports from /available_ports.
+- If you pass both filter and search, filter is used.
+- “No usable VLAN found” often means the port advertises none or they’re all in use.
+
+- If you want to skip availability checks, use get_l2vpn_payload() and post it yourself; otherwise use create_l2vpn_from_selection() to keep checks on.
+
+## Troubleshooting
+
+- 401 / missing token → set a valid token or ensure FABRIC token is discoverable.
+- Empty listings → loosen your filter/search; inspect /topology.
+- Availability errors → verify get_port_vlans_available(port_id) shows a range that contains your requested VLAN token.
+
+## Changelog (relevant)
+
+- Added set_l2vpn_payload(name, notifications): stage metadata once.
+- Added get_l2vpn_payload(): build local payload without network.
+- create_l2vpn_from_selection() no longer requires passing name/notifications; it uses staged metadata and runs a preview internally.

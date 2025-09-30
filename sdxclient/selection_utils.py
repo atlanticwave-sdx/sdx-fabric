@@ -107,24 +107,3 @@ def _choose_vlan_from_device_info(device_info: Dict[str, Any], prefer_untagged: 
 
     first_token = available_vlans_field.split(",")[0].strip()
     return first_token if first_token else None
-
-
-# ---- Payload ----
-
-def _build_l2vpn_payload(
-    *,
-    name: str,
-    notifications: str,
-    first_endpoint: Dict[str, Any],
-    second_endpoint: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Build an L2VPN payload including port_id and vlan from both endpoints."""
-    return {
-        "name": name,
-        "notifications": [notifications],
-        "endpoints": [
-            {"port_id": first_endpoint["port_id"], "vlan": first_endpoint["vlan"]},
-            {"port_id": second_endpoint["port_id"], "vlan": second_endpoint["vlan"]},
-        ],
-    }
-
