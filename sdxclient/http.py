@@ -63,6 +63,9 @@ def _http_request(
         payload = response.json()
         # Parsed JSON
         if response.ok:
+            # If the server already returned our standard envelope, pass it through.
+            if isinstance(payload, dict) and {"status_code", "data", "error"} <= set(payload.keys()):
+                return payload
             return {"status_code": response.status_code, "data": payload, "error": None}
 
         # Prefer common fields from controllers.

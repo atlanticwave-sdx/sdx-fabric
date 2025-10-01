@@ -63,7 +63,7 @@ client.get_port_vlans_available(port_id)
 ## Selection Flow (endpoints)
 
 ```python
-client.begin_l2vpn_selection()
+client.clear_selection()
 client.set_endpoint(
     endpoint_position="first" | "second",
     filter=None, search=None,
@@ -131,7 +131,7 @@ client = SDXClient()
 
 **1) Start fresh**
 ```python
-client.begin_l2vpn_selection()
+client.clear_selection()
 ```
 
 **2) Choose endpoints**
