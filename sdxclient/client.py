@@ -6,7 +6,6 @@ from .config import BASE_URL
 from .fablib_token import _load_fabric_token
 from .http import _http_request
 from .selection_utils import (
-    _begin_selection_state,
     _choose_vlan_from_device_info,
     _extract_rows_list,
     _find_matching_rows,           # matcher for available_ports rows
@@ -164,7 +163,7 @@ class SDXClient:
         # L2VPN payload metadata (staged once)
         self._l2vpn_name: Optional[str] = None
         self._l2vpn_ownership: Optional[str] = None
-        self._l2vpn_notifications: Optional[List[str]] = None
+        self._l2vpn_notifications: Optional[List[Dict[str, str]]] = None
         self._l2vpn_service_id: Optional[str] = None
         # Selection state
         self._first_endpoint: Optional[Dict[str, Any]] = None
@@ -181,16 +180,28 @@ class SDXClient:
         return {"status_code": 200, "data": True, "error": None}
 
     @_api_guard
-    def begin_l2vpn_selection(self) -> Dict[str, Any]:
-        self._first_endpoint = None
-        self._second_endpoint = None
-        return {"status_code": 200, "data": _begin_selection_state(self), "error": None}
+    def get_selection(self) -> Dict[str, Any]:
+        return {
+                "status_code": 200,
+                "data": {
+                    "name": self._l2vpn_name,
+                    "notifications": self._l2vpn_notifications,
+                    "first": self._first_endpoint,
+                    "second": self._second_endpoint,
+                    "service_id": self._l2vpn_service_id,
+                    },
+                "error": None,
+                }
 
     @_api_guard
     def clear_selection(self) -> Dict[str, Any]:
+        self._l2vpn_name = None
+        self._l2vpn_ownership = None
+        self._l2vpn_notifications = None
+        self._l2vpn_service_id = None
         self._first_endpoint = None
         self._second_endpoint = None
-        return {"status_code": 200, "data": _begin_selection_state(self), "error": None}
+        return self.get_selection()
 
     @_api_guard
     def get_selected_endpoints(self) -> Dict[str, Any]:
@@ -505,7 +516,8 @@ class SDXClient:
             json_body=result["data"], accept="application/json",
             timeout=self.timeout, expect_json=True,
         )
-        self._l2vpn_service_id = response.json().get("data", {}).get("service_id")
+        if response["status_code"] in (200, 201) and isinstance(response.get("data"), dict):
+            self._l2vpn_service_id = response["data"].get("service_id")
         return response
 
     # ---------- Raw JSON mirrors ----------

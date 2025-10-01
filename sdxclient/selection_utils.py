@@ -18,14 +18,6 @@ from typing import Any, Dict, List, Optional
 from .http import _http_request
 
 
-# ---- State ----
-
-def _begin_selection_state(client=None) -> Dict[str, Any]:
-    """Return a reset state dictionary for endpoint selection."""
-    # client is unused; accepted for symmetry with calls from SDXClient
-    return {"first": None, "second": None}
-
-
 # ---- Available ports ----
 
 def _list_available_ports_json(client, query_text: Optional[str], *, use_filter: bool) -> Dict[str, Any]:
