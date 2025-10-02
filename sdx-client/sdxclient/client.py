@@ -13,10 +13,11 @@ from .selection_utils import (
     _fetch_device_info_by_port_id,
 )
 from .validator import (
-    _validate_endpoint_dict,
-    _validate_endpoints,
+    _missing_params,
     _validate_name,
     _validate_notifications,
+    _validate_endpoint_dict,
+    _validate_endpoints,
 )
 
 # ---------------------------
@@ -35,12 +36,6 @@ def _api_guard(target_function):
         except Exception as exception:  # noqa: BLE001
             return {"status_code": 0, "data": None, "error": f"{type(exception).__name__}: {exception}"}
     return wrapper
-
-
-def _missing_params(**pairs: Any) -> Optional[str]:
-    """Return a 'missing required parameter(s): a, b' message or None."""
-    missing_parameters = [name for name, value in pairs.items() if value in (None, "", [])]
-    return f"missing required parameter(s): {', '.join(missing_parameters)}" if missing_parameters else None
 
 # ---------------------------
 # VLAN token parsing
