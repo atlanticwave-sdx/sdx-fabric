@@ -213,3 +213,92 @@ client.get_l2vpn_payload()   # without staging metadata
 - Added set_l2vpn_payload(name, notifications): stage metadata once.
 - Added get_l2vpn_payload(): build local payload without network.
 - create_l2vpn_from_selection() no longer requires passing name/notifications; it uses staged metadata and runs a preview internally.
+
+# Install
+
+## Production (PyPI)
+pip install sdxclient
+## or a specific version
+pip install sdxclient==0.10.0
+
+## Test (TestPyPI pre-releases)
+- Prefer exact RC version when installing from TestPyPI
+
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple \
+            sdxclient==0.10.0rc1
+- or allow any pre-release (if available)
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple \
+            --pre sdxclient
+
+## Runtime configuration (test vs prod API)
+
+- sdxclient reads the base URL from the environment:
+
+## Test (default if unset in config.py)
+export SDX_BASE_URL=http://190.103.184.194
+
+## Production
+export SDX_BASE_URL=https://sdxapi.atlanticwave-sdx.ai
+
+- If SDX_BASE_URL isn’t set, the package falls back to the default defined in sdxclient/config.py.
+
+## Releasing (maintainers)
+
+- This project uses GitHub Actions + Trusted Publishing.
+
+## Branch/PR flow
+
+- Open PRs as usual. CI will build only (no publish).
+
+- On merge to main, if the version is a pre-release (contains rc), CI publishes to TestPyPI.
+
+## Test release (TestPyPI)
+
+- Bump version in sdx-client/pyproject.toml to an RC:
+
+- version = "X.Y.ZrcN"
+
+
+## Merge the PR to main or run the workflow manually:
+
+- Actions → “Build & Publish (TestPyPI → PyPI)” → Run workflow
+
+- target: testpypi
+
+## Install for testing:
+
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple \
+            sdxclient==X.Y.ZrcN
+
+## Production release (PyPI)
+
+### Bump version to a final:
+
+- version = "X.Y.Z"
+
+
+### Tag and push the tag:
+
+- git tag vX.Y.Z
+- git push origin vX.Y.Z
+- (Or run the workflow manually with target: pypi.)
+
+## Install from PyPI:
+
+pip install sdxclient==X.Y.Z
+
+## Rules the workflow enforces
+
+- TestPyPI requires version to contain rc.
+- PyPI requires version without rc.
+- Publishing uses OIDC (no API tokens).
+- Manual run (optional)
+
+## From GitHub → Actions → “Build & Publish (TestPyPI → PyPI)” → Run workflow:
+
+- target: testpypi (expects rc in version)
+- target: pypi (expects final version)
+- Pick the branch that contains your version bump.

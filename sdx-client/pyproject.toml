@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sdxclient"
-# version = "0.10.0"
-version = "0.10.0rc1"
+version = "0.10.0"
+# version = "0.10.0rc1"
 description = "A Python client library for interacting with the AtlanticWave-SDX L2VPN API"
 readme = "README.md"
 authors = [
