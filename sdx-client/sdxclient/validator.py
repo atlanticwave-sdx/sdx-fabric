@@ -30,6 +30,10 @@ ALLOWED_SPECIAL_VLANS = {"any", "untagged"}  # "all" is intentionally NOT allowe
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # ---------- simple checks ----------
+def _missing_params(**pairs: Any) -> Optional[str]:
+    """Return a 'missing required parameter(s): a, b' message or None."""
+    missing_parameters = [name for name, value in pairs.items() if value in (None, "", [])]
+    return f"missing required parameter(s): {', '.join(missing_parameters)}" if missing_parameters else None
 
 def _validate_name(name: Optional[str]) -> str:
     """Non-empty <= 50 chars."""

@@ -1,0 +1,2 @@
+include README.md
+recursive-include sdxclient *.py *.json *.yaml *.yml *.txt
