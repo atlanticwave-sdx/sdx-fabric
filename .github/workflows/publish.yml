@@ -2,26 +2,60 @@ name: Build & Publish (TestPyPI → PyPI)
 
 on:
   push:
-    branches: ["main"]          # pre-releases (rc) → TestPyPI
+    branches: ["main"]              # publish to TestPyPI on merge to main
     tags:
-      - "v*.*.*"                # e.g., v0.10.0 → PyPI
+      - "v*.*.*"                    # publish to PyPI on version tags
+  pull_request:
+    branches: ["main"]              # build-only on PRs targeting main
+  workflow_dispatch:                 # manual trigger from Actions tab
+    inputs:
+      target:
+        description: "Choose where to publish"
+        required: true
+        default: "testpypi"
+        type: choice
+        options:
+          - testpypi
+          - pypi
 
 permissions:
-  id-token: write               # REQUIRED for OIDC Trusted Publishing
+  id-token: write                   # REQUIRED for OIDC Trusted Publishing
   contents: read
 
 env:
-  # Set your endpoints here (Actions will export SDX_BASE_URL per job)
-  TEST_SDX_BASE_URL: http://190.103.184.194
+  TEST_SDX_BASE_URL: https://190.103.184.194
   PROD_SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai
 
 jobs:
-  build:
-    name: Build package artifacts
+  # Build on PRs only (no publishing)
+  pr-build:
+    name: Build on pull_request (no publish)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: sdx-client        # your package lives in this subdir
+        working-directory: sdx-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tool
+        run: python -m pip install --upgrade build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+  # Build artifacts for push/tag/manual (publishing paths)
+  build:
+    name: Build package artifacts
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdx-client
     steps:
       - uses: actions/checkout@v4
 
@@ -42,65 +76,74 @@ jobs:
           path: sdx-client/dist/*
 
   publish-testpypi:
-    name: Publish to TestPyPI (on main)
-    if: github.ref == 'refs/heads/main'
+    name: Publish to TestPyPI
+    # Runs on:
+    # - push to main (merge)
+    # - OR manual dispatch with target == testpypi
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
     needs: build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdx-client
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-        # path defaults to ./dist
+          path: sdx-client/dist
 
-      # Guard: ensure pre-release (rc) when publishing from main
-      - name: Ensure pre-release version on main
+      # Guard: require pre-release (rc) for TestPyPI
+      - name: Ensure pre-release version
         run: |
           python - <<'PY'
-          import sys, pathlib
-          import tomllib
-          data = tomllib.loads(pathlib.Path("sdx-client/pyproject.toml").read_text())
-          ver = data["project"]["version"]
+          import sys, pathlib, tomllib
+          ver = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
           if "rc" not in ver:
-              print(f"ERROR: main pushes must use pre-release (found {ver})")
+              print(f"ERROR: TestPyPI publishes must use pre-release (found {ver})")
               sys.exit(1)
           PY
 
       - name: Set test base URL for this job
         run: echo "SDX_BASE_URL=${{ env.TEST_SDX_BASE_URL }}" >> $GITHUB_ENV
 
-      - name: Publish to TestPyPI (Trusted Publishing via OIDC)
+      - name: Publish to TestPyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
 
   publish-pypi:
-    name: Publish to PyPI (on tag)
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish to PyPI
+    # Runs on:
+    # - tag push (vX.Y.Z)
+    # - OR manual dispatch with target == pypi
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
     needs: build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdx-client
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
+          path: sdx-client/dist
 
-      # Guard: ensure final (non-rc) on tagged release
-      - name: Ensure final version on tag
+      # Guard: require final (non-rc) for PyPI
+      - name: Ensure final version
         run: |
           python - <<'PY'
-          import sys, pathlib
-          import tomllib
-          data = tomllib.loads(pathlib.Path("sdx-client/pyproject.toml").read_text())
-          ver = data["project"]["version"]
+          import sys, pathlib, tomllib
+          ver = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
           if "rc" in ver:
-              print(f"ERROR: tagged releases must be final (found {ver})")
+              print(f"ERROR: PyPI publishes must be final (found {ver})")
               sys.exit(1)
           PY
 
       - name: Set prod base URL for this job
         run: echo "SDX_BASE_URL=${{ env.PROD_SDX_BASE_URL }}" >> $GITHUB_ENV
 
-      - name: Publish to PyPI (Trusted Publishing via OIDC)
+      - name: Publish to PyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
