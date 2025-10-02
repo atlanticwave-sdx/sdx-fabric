@@ -73,7 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: sdx-client/dist/*
+          path: dist/*
 
   publish-testpypi:
     name: Publish to TestPyPI
@@ -90,7 +90,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: sdx-client/dist
+          path: dist
 
       # Guard: require pre-release (rc) for TestPyPI
       - name: Ensure pre-release version
@@ -127,7 +127,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: sdx-client/dist
+          path: dist
 
       # Guard: require final (non-rc) for PyPI
       - name: Ensure final version
