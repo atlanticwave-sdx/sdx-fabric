@@ -296,3 +296,50 @@ pip install sdxclient==X.Y.Z
 - target: testpypi (expects rc in version)
 - target: pypi (expects final version)
 - Pick the branch that contains your version bump.
+
+# Releases & Publishing
+
+- This project is published to both TestPyPI (pre-releases) and PyPI (final releases).
+- Publishing is automated through GitHub Actions.
+
+## Versioning Rules
+
+- Every release must use a new unique version in sdx-client/pyproject.toml.
+- Pre-releases (for testing) use the rc suffix, e.g.:
+
+version = "0.10.1rc1"
+
+## Final production releases use only numbers:
+
+version = "0.10.1"
+
+## Release Flow
+
+- Update version in pyproject.toml.
+- Example: bump from 0.10.0 → 0.10.1rc1 for TestPyPI, or 0.10.1 for PyPI.
+
+git add sdx-client/pyproject.toml
+git commit -m "Bump version to 0.10.1rc1"
+git push
+
+
+## Trigger TestPyPI publish (pre-release):
+
+- Merge to main, or
+- Manually run the GitHub Action with target=testpypi.
+
+## Trigger PyPI publish (final release):
+
+- Ensure pyproject.toml has a final version (no rc).
+
+## Tag the commit and push the tag:
+
+git tag v0.10.1
+git push origin v0.10.1
+
+
+## This will run the publish job to PyPI automatically.
+
+## Switching Between Test & Production
+
+## The client uses an environment variable to choose which API endpoint to talk to Production (default if not set)
