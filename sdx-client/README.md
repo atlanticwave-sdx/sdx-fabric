@@ -236,13 +236,7 @@ pip install --index-url https://test.pypi.org/simple/ \
 
 - sdxclient reads the base URL from the environment:
 
-## Test (default if unset in config.py)
-export SDX_BASE_URL=http://190.103.184.194
-
-## Production
-export SDX_BASE_URL=https://sdxapi.atlanticwave-sdx.ai
-
-- If SDX_BASE_URL isn’t set, the package falls back to the default defined in sdxclient/config.py.
+- If SDX_BASE_URL isn’t set, the package falls back to production.
 
 ## Releasing (maintainers)
 
