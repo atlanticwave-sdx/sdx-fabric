@@ -2,10 +2,10 @@ name: Build & Publish (TestPyPI → PyPI)
 
 on:
   push:
-    branches: ["main"]
-    tags: ["v*.*.*"]
+    branches: ["main"]                # publish to TestPyPI on merge to main
+    tags: ["v*.*.*"]                  # publish to PyPI on version tags
   pull_request:
-    branches: ["main"]
+    branches: ["main"]                # build-only on PRs
   workflow_dispatch:
     inputs:
       target:
@@ -16,16 +16,15 @@ on:
         options: [testpypi, pypi]
 
 permissions:
-  id-token: write
+  id-token: write                     # OIDC Trusted Publishing
   contents: read
 
 env:
-  SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai      # prod default
-  TEST_SDX_BASE_URL: https://190.103.184.194            # test default
+  TEST_SDX_BASE_URL: https://190.103.184.194
+  PROD_SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai
 
 jobs:
   pr-build:
-    name: Build on pull_request (no publish)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -34,13 +33,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # needed for setuptools_scm
+          fetch-depth: 0
           fetch-tags: true
+      - name: Ensure tags are present
+        run: git fetch --force --tags
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
       - name: Install build tool
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade build setuptools_scm
+      - name: Show resolved version
+        run: |
+          python -m setuptools_scm
+          git describe --tags --always --dirty || true
+      - name: Clean dist
+        run: rm -rf dist/*
       - name: Build sdist and wheel
         run: python -m build
 
@@ -56,18 +62,26 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Ensure tags are present
+        run: git fetch --force --tags
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
       - name: Install build tool
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade build setuptools_scm
+      - name: Show resolved version
+        run: |
+          python -m setuptools_scm
+          git describe --tags --always --dirty || true
+      - name: Clean dist
+        run: rm -rf dist/*
       - name: Build sdist and wheel
         run: python -m build
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist/*
+          path: sdx-client/dist/*
+          if-no-files-found: error
 
   publish-testpypi:
     name: Publish to TestPyPI
@@ -81,34 +95,41 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist
+          path: sdx-client/dist
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      # need repo + tags for git describe guard
+      # Resolve version using setuptools_scm from the repo (artifact-only publish)
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Ensure tags are present
+        run: git fetch --force --tags
+      - name: Install setuptools_scm for version check
+        run: python -m pip install --upgrade setuptools_scm
 
-      # Dynamically set runtime base URL for test
+      # Allow dev or rc for TestPyPI
+      - name: Ensure pre-release/dev version (TestPyPI)
+        run: |
+          VER="$(python -m setuptools_scm || true)"
+          echo "Resolved version: ${VER}"
+          if [[ -z "${VER}" ]]; then
+            echo "ERROR: Could not resolve version via setuptools_scm"; exit 1
+          fi
+          if [[ "${VER}" != *".dev"* && "${VER}" != *"rc"* ]]; then
+            echo "ERROR: TestPyPI expects a dev or rc version (got ${VER})"; exit 1
+          fi
+
       - name: Set SDX_BASE_URL for TestPyPI
         run: echo "SDX_BASE_URL=${TEST_SDX_BASE_URL}" >> "$GITHUB_ENV"
-
-      # Guard: must NOT be a clean release tag
-      - name: Ensure NOT a final release tag
-        run: |
-          python - <<'PY'
-          import subprocess, re, sys
-          ref = subprocess.check_output(["git","describe","--tags","--dirty","--always"], text=True).strip()
-          if re.fullmatch(r"v\d+\.\d+\.\d+", ref):
-              sys.exit(f"Ref {ref} is a final tag; TestPyPI expects a dev/pre build.")
-          print(f"OK: {ref} is not a final tag")
-          PY
 
       - name: Publish to TestPyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
+          packages-dir: sdx-client/dist
 
   publish-pypi:
     name: Publish to PyPI
@@ -122,27 +143,41 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist
+          path: sdx-client/dist
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      # need repo + tags for git describe guard
+      # Resolve version using setuptools_scm from the repo (artifact-only publish)
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Ensure tags are present
+        run: git fetch --force --tags
+      - name: Install setuptools_scm for version check
+        run: python -m pip install --upgrade setuptools_scm
 
-      # Guard: must BE a clean release tag
-      - name: Ensure final release tag (vX.Y.Z)
+      # Require clean final version for PyPI
+      - name: Ensure final version (PyPI)
         run: |
-          python - <<'PY'
-          import subprocess, re, sys
-          ref = subprocess.check_output(["git","describe","--tags","--dirty","--always"], text=True).strip()
-          if not re.fullmatch(r"v\d+\.\d+\.\d+", ref):
-              sys.exit(f"Ref {ref} is not a clean final tag vX.Y.Z (got {ref}).")
-          print(f"OK: {ref} is a final tag")
-          PY
+          VER="$(python -m setuptools_scm || true)"
+          echo "Resolved version: ${VER}"
+          if [[ -z "${VER}" ]]; then
+            echo "ERROR: Could not resolve version via setuptools_scm"; exit 1
+          fi
+          if [[ "${VER}" == *".dev"* || "${VER}" == *"rc"* ]]; then
+            echo "ERROR: PyPI expects a final release version (got ${VER})"; exit 1
+          fi
+          if ! [[ "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Version must be X.Y.Z (got ${VER})"; exit 1
+          fi
+
+      - name: Set SDX_BASE_URL for Production
+        run: echo "SDX_BASE_URL=${PROD_SDX_BASE_URL}" >> "$GITHUB_ENV"
 
       - name: Publish to PyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          skip-existing: true
+          # Intentionally NOT using skip-existing here so reusing a version fails loudly
+          packages-dir: sdx-client/dist
 
