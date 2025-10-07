@@ -21,7 +21,7 @@ A thin Python client that wraps the SDX HTTP routes, stages L2VPN payload metada
 
 ```python
 from sdxclient import SDXClient
-client = SDXClient(timeout=6.0)            # tries FABRIC token
+client = SDXClient()            # tries FABRIC token
 ```
 
 ## Return Shape (always)
@@ -263,83 +263,88 @@ pip install --index-url https://test.pypi.org/simple/ \
 
 ## Install for testing:
 
+```bash
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple \
             sdxclient==X.Y.ZrcN
+```
 
-## Production release (PyPI)
+# Releasing and Publishing
 
-### Bump version to a final:
-
-- version = "X.Y.Z"
-
-
-### Tag and push the tag:
-
-- git tag vX.Y.Z
-- git push origin vX.Y.Z
-- (Or run the workflow manually with target: pypi.)
-
-## Install from PyPI:
-
-pip install sdxclient==X.Y.Z
-
-## Rules the workflow enforces
-
-- TestPyPI requires version to contain rc.
-- PyPI requires version without rc.
-- Publishing uses OIDC (no API tokens).
-- Manual run (optional)
-
-## From GitHub → Actions → “Build & Publish (TestPyPI → PyPI)” → Run workflow:
-
-- target: testpypi (expects rc in version)
-- target: pypi (expects final version)
-- Pick the branch that contains your version bump.
-
-# Releases & Publishing
-
-- This project is published to both TestPyPI (pre-releases) and PyPI (final releases).
-- Publishing is automated through GitHub Actions.
+### This project uses setuptools_scm for automatic versioning from Git tags.
+### GitHub Actions handles all publishing to TestPyPI and PyPI using OIDC Trusted Publishing — no API tokens needed.
 
 ## Versioning Rules
 
-- Every release must use a new unique version in sdx-client/pyproject.toml.
-- Pre-releases (for testing) use the rc suffix, e.g.:
+- Do not edit the version manually in pyproject.toml.
+- The version is derived automatically from your latest Git tag.
+- Pre-releases (for testing) use release candidate tags:
 
-version = "0.10.1rc1"
+```bash
+git tag v0.10.1rc1
+git push origin v0.10.1rc1
+```
 
-## Final production releases use only numbers:
+### → publishes to TestPyPI with version 0.10.1rc1.
 
-version = "0.10.1"
+- Final production releases use numeric tags only:
 
-## Release Flow
-
-- Update version in pyproject.toml.
-- Example: bump from 0.10.0 → 0.10.1rc1 for TestPyPI, or 0.10.1 for PyPI.
-
-git add sdx-client/pyproject.toml
-git commit -m "Bump version to 0.10.1rc1"
-git push
-
-
-## Trigger TestPyPI publish (pre-release):
-
-- Merge to main, or
-- Manually run the GitHub Action with target=testpypi.
-
-## Trigger PyPI publish (final release):
-
-- Ensure pyproject.toml has a final version (no rc).
-
-## Tag the commit and push the tag:
-
-git tag v0.10.1
+```bash
+git tag -a v0.10.1 -m "Release 0.10.1"
 git push origin v0.10.1
+```
 
+### → publishes to PyPI with version 0.10.1.
 
-## This will run the publish job to PyPI automatically.
+# Test Builds (TestPyPI)
 
-## Switching Between Test & Production
+- Trigger:
 
-## The client uses an environment variable to choose which API endpoint to talk to Production (default if not set)
+- Merge or push to the main branch
+- Manual workflow run with target=testpypi
+
+- Version format:
+
+- 0.10.x.devN+gHASH (auto-generated dev build)
+- or 0.10.1rc1 (pre-release tag)
+
+- Install from TestPyPI:
+
+```bash
+pip install -i https://test.pypi.org/simple/ sdxclient
+```
+
+# Production Releases (PyPI)
+
+- Trigger: push an annotated tag vX.Y.Z
+
+- Version format: clean X.Y.Z (no rc, no dev)
+
+- Install from PyPI:
+
+```bash
+pip install sdxclient==X.Y.Z
+```
+
+# Manual Publishing (optional)
+
+## run the workflow manually from GitHub:
+
+### Actions → “Build & Publish (TestPyPI → PyPI)” → “Run workflow”
+
+## Pick:
+
+- target: testpypi → expects pre-release or dev version
+- target: pypi → expects final version
+- Choose the branch or tag that contains your release commit.
+
+# Rules Enforced by the Workflow
+
+- TestPyPI: only accepts pre-release or dev versions (rc, devN, etc.).
+- PyPI: only accepts clean versions (no suffix).
+- No API tokens: OIDC Trusted Publishing handles authentication.
+- Same wheel: one build artifact published to both indexes.
+- Runtime URLs:
+
+- Test: SDX_BASE_URL=https://190.103.184.194
+- Prod: SDX_BASE_URL=https://sdxapi.atlanticwave-sdx.ai
