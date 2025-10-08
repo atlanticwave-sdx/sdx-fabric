@@ -3,31 +3,31 @@ name: Build & Publish (TestPyPI → PyPI)
 on:
   push:
     branches: ["main"]                # publish to TestPyPI on merge to main
-    tags:
-      - "v*.*.*"                      # publish to PyPI on version tags
+    tags: ["v*.*.*"]                  # publish to PyPI on version tags
   pull_request:
-    branches: ["main"]                # build-only on PRs targeting main
-  workflow_dispatch:                  # manual trigger from Actions tab
+    branches: ["main"]                # build-only on PRs
+  workflow_dispatch:
     inputs:
       target:
         description: "Choose where to publish"
         required: true
         default: "testpypi"
         type: choice
-        options:
-          - testpypi
-          - pypi
+        options: [testpypi, pypi]
 
 permissions:
-  id-token: write                     # REQUIRED for OIDC Trusted Publishing
+  id-token: write                     # OIDC Trusted Publishing
   contents: read
 
+env:
+  TEST_SDX_BASE_URL: https://190.103.184.194
+  PROD_SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai
+
 jobs:
-  # ----------------------------------------------------
-  # Build on pull requests only (no publish)
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
+  # PR build only (no publish)
+  # -------------------------------------------------------------------------
   pr-build:
-    name: Build on pull_request (no publish)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -38,20 +38,25 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-
+      - name: Ensure tags are present
+        run: git fetch --force --tags
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install build tools
+      - name: Install build tool
         run: python -m pip install --upgrade build setuptools_scm
-
+      - name: Show resolved version
+        run: |
+          python -m setuptools_scm || echo "No version resolved"
+          git describe --tags --always --dirty || true
+      - name: Clean dist
+        run: rm -rf dist/*
       - name: Build sdist and wheel
         run: python -m build
 
-  # ----------------------------------------------------
-  # Build artifacts for push/tag/manual
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Build artifacts for main/tag/manual
+  # -------------------------------------------------------------------------
   build:
     name: Build package artifacts
     if: github.event_name != 'pull_request'
@@ -64,42 +69,41 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-
       - name: Ensure tags are present
-        run: |
-          git fetch --force --tags
-          git describe --tags --always --dirty || true
-          git tag -l | tail -n 10
-
+        run: git fetch --force --tags
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install build tools
+      - name: Install build tool
         run: python -m pip install --upgrade build setuptools_scm
-
-      - name: Inject pretend version for tag builds
+      - name: Show resolved version
+        run: |
+          python -m setuptools_scm || echo "No version resolved"
+          git describe --tags --always --dirty || true
+      - name: Inject scm pretend version for tag builds
         if: startsWith(github.ref, 'refs/tags/v')
         run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
+      - name: Clean dist
+        run: rm -rf dist/*
       - name: Build sdist and wheel
         run: python -m build
-
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/*
+          name: dist-${{ github.ref_name }}
+          path: sdx-client/dist/*
+          if-no-files-found: error
 
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
   # Publish to TestPyPI
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
   publish-testpypi:
     name: Publish to TestPyPI
-    # Runs on:
-    # - push to main (merge)
-    # - OR manual dispatch with target == testpypi
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
+    if: >
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref_name, 'v') && contains(github.ref_name, 'rc')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
@@ -108,47 +112,45 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist
+          name: dist-${{ github.ref_name }}
+          path: sdx-client/dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Ensure NOT a final release tag
+      # Validate artifact version from filenames (no git required here)
+      - name: Ensure pre-release/dev version (TestPyPI)
         run: |
-          python - <<'PY'
-          import subprocess, re, sys
-          ref = subprocess.check_output(
-              ["git","describe","--tags","--dirty","--always"],
-              text=True
-          ).strip()
-          if re.fullmatch(r"v\\d+\\.\\d+\\.\\d+", ref):
-              sys.exit(f"Ref {ref} is a final tag; TestPyPI expects a dev/pre build.")
-          print(f"OK: {ref} is not a final tag")
-          PY
+          cd dist
+          FILE=$(ls sdxclient-*.tar.gz | head -n1)
+          BASENAME=$(basename "$FILE")
+          VER=${BASENAME#sdxclient-}
+          VER=${VER%.tar.gz}
+          echo "Artifact version: $VER"
+          if [[ "$VER" != *".dev"* && "$VER" != *"rc"* ]]; then
+            echo "ERROR: TestPyPI expects a dev or rc version (got $VER)"
+            exit 1
+          fi
 
-      - name: Bake SDX_BASE_URL for TestPyPI
-        run: |
-          python - <<'PY'
-          import pathlib
-          test_url = "https://190.103.184.194"
-          path = pathlib.Path("sdxclient/config.py")
-          path.write_text(f"# Auto-generated during TestPyPI build\nSDX_BASE_URL = '{test_url}'\n")
-          print("Baked SDX_BASE_URL =", test_url)
-          PY
+      - name: Set SDX_BASE_URL for TestPyPI
+        run: echo "SDX_BASE_URL=${TEST_SDX_BASE_URL}" >> "$GITHUB_ENV"
 
       - name: Publish to TestPyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
+          packages-dir: sdx-client/dist
 
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
   # Publish to PyPI
-  # ----------------------------------------------------
+  # -------------------------------------------------------------------------
   publish-pypi:
     name: Publish to PyPI
-    # Runs on:
-    # - tag push (vX.Y.Z)
-    # - OR manual dispatch with target == pypi
-    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
+    if: >
+      github.event_name != 'pull_request' &&
+      ((startsWith(github.ref_name, 'v') && !contains(github.ref_name, 'rc')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
@@ -157,24 +159,36 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist
+          name: dist-${{ github.ref_name }}
+          path: sdx-client/dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Ensure final release tag (vX.Y.Z)
+      # Validate artifact version from filenames (no git required here)
+      - name: Ensure final version (PyPI)
         run: |
-          python - <<'PY'
-          import subprocess, re, sys
-          ref = subprocess.check_output(
-              ["git","describe","--tags","--dirty","--always"],
-              text=True
-          ).strip()
-          if not re.fullmatch(r"v\\d+\\.\\d+\\.\\d+", ref):
-              sys.exit(f"Ref {ref} is not a clean final tag vX.Y.Z (got {ref}).")
-          print(f"OK: {ref} is a final tag")
-          PY
+          cd dist
+          FILE=$(ls sdxclient-*.tar.gz | head -n1)
+          BASENAME=$(basename "$FILE")
+          VER=${BASENAME#sdxclient-}
+          VER=${VER%.tar.gz}
+          echo "Artifact version: $VER"
+          if [[ "$VER" == *".dev"* || "$VER" == *"rc"* ]]; then
+            echo "ERROR: PyPI expects a final release version (got $VER)"
+            exit 1
+          fi
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Version must be X.Y.Z (got $VER)"
+            exit 1
+          fi
+
+      - name: Set SDX_BASE_URL for Production
+        run: echo "SDX_BASE_URL=${PROD_SDX_BASE_URL}" >> "$GITHUB_ENV"
 
       - name: Publish to PyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          skip-existing: true
+          # Don't skip — fail loudly on reused versions (recommended)
+          packages-dir: sdx-client/dist
 
