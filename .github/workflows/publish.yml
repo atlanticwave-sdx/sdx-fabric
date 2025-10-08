@@ -24,6 +24,9 @@ env:
   PROD_SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai
 
 jobs:
+  # -------------------------------------------------------------------------
+  # PR build only (no publish)
+  # -------------------------------------------------------------------------
   pr-build:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -38,18 +41,22 @@ jobs:
       - name: Ensure tags are present
         run: git fetch --force --tags
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - name: Install build tool
         run: python -m pip install --upgrade build setuptools_scm
       - name: Show resolved version
         run: |
-          python -m setuptools_scm
+          python -m setuptools_scm || echo "No version resolved"
           git describe --tags --always --dirty || true
       - name: Clean dist
         run: rm -rf dist/*
       - name: Build sdist and wheel
         run: python -m build
 
+  # -------------------------------------------------------------------------
+  # Build artifacts for main/tag/manual
+  # -------------------------------------------------------------------------
   build:
     name: Build package artifacts
     if: github.event_name != 'pull_request'
@@ -65,12 +72,13 @@ jobs:
       - name: Ensure tags are present
         run: git fetch --force --tags
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - name: Install build tool
         run: python -m pip install --upgrade build setuptools_scm
       - name: Show resolved version
         run: |
-          python -m setuptools_scm
+          python -m setuptools_scm || echo "No version resolved"
           git describe --tags --always --dirty || true
       - name: Clean dist
         run: rm -rf dist/*
@@ -83,13 +91,16 @@ jobs:
           path: sdx-client/dist/*
           if-no-files-found: error
 
+  # -------------------------------------------------------------------------
+  # Publish to TestPyPI
+  # -------------------------------------------------------------------------
   publish-testpypi:
     name: Publish to TestPyPI
-    if: github.event_name != 'pull_request' && (
-      github.ref == 'refs/heads/main' ||
-      startsWith(github.ref_name, 'v') && contains(github.ref_name, 'rc') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi')
-    )
+    if: >
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref_name, 'v') && contains(github.ref_name, 'rc')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
@@ -101,7 +112,8 @@ jobs:
           name: dist
           path: sdx-client/dist
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       # Validate artifact version from filenames (no git required here)
       - name: Ensure pre-release/dev version (TestPyPI)
@@ -113,7 +125,8 @@ jobs:
           VER=${VER%.tar.gz}
           echo "Artifact version: $VER"
           if [[ "$VER" != *".dev"* && "$VER" != *"rc"* ]]; then
-            echo "ERROR: TestPyPI expects a dev or rc version (got $VER)"; exit 1
+            echo "ERROR: TestPyPI expects a dev or rc version (got $VER)"
+            exit 1
           fi
 
       - name: Set SDX_BASE_URL for TestPyPI
@@ -126,12 +139,15 @@ jobs:
           skip-existing: true
           packages-dir: sdx-client/dist
 
+  # -------------------------------------------------------------------------
+  # Publish to PyPI
+  # -------------------------------------------------------------------------
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name != 'pull_request' && (
-      startsWith(github.ref_name, 'v') && !contains(github.ref_name, 'rc') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
-    )
+    if: >
+      github.event_name != 'pull_request' &&
+      ((startsWith(github.ref_name, 'v') && !contains(github.ref_name, 'rc')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
@@ -143,7 +159,8 @@ jobs:
           name: dist
           path: sdx-client/dist
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       # Validate artifact version from filenames (no git required here)
       - name: Ensure final version (PyPI)
@@ -155,10 +172,12 @@ jobs:
           VER=${VER%.tar.gz}
           echo "Artifact version: $VER"
           if [[ "$VER" == *".dev"* || "$VER" == *"rc"* ]]; then
-            echo "ERROR: PyPI expects a final release version (got $VER)"; exit 1
+            echo "ERROR: PyPI expects a final release version (got $VER)"
+            exit 1
           fi
           if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Version must be X.Y.Z (got $VER)"; exit 1
+            echo "ERROR: Version must be X.Y.Z (got $VER)"
+            exit 1
           fi
 
       - name: Set SDX_BASE_URL for Production
@@ -167,6 +186,6 @@ jobs:
       - name: Publish to PyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # remove skip-existing to fail loudly on reused versions (recommended)
+          # Don't skip — fail loudly on reused versions (recommended)
           packages-dir: sdx-client/dist
 
