@@ -1,8 +1,9 @@
 import os
-
-BASE_URL = os.getenv("SDX_BASE_URL")
-if not BASE_URL:
-    raise EnvironmentError(
-        "SDX_BASE_URL is not defined. Set it before importing sdxclient."
-    )
+def get_base_url():
+    sdx_base_url = os.getenv("SDX_BASE_URL")
+    if not sdx_base_url:
+        raise EnvironmentError("SDX_BASE_URL is not defined.")
+    return sdx_base_url
+# optional back-compat:
+BASE_URL = get_base_url()
 
