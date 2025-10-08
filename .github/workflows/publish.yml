@@ -80,6 +80,9 @@ jobs:
         run: |
           python -m setuptools_scm || echo "No version resolved"
           git describe --tags --always --dirty || true
+      - name: Inject scm pretend version for tag builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Clean dist
         run: rm -rf dist/*
       - name: Build sdist and wheel
@@ -175,5 +178,17 @@ jobs:
             echo "ERROR: PyPI expects a final release version (got $VER)"
             exit 1
           fi
-          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\]()]()
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Version must be X.Y.Z (got $VER)"
+            exit 1
+          fi
+
+      - name: Set SDX_BASE_URL for Production
+        run: echo "SDX_BASE_URL=${PROD_SDX_BASE_URL}" >> "$GITHUB_ENV"
+
+      - name: Publish to PyPI (OIDC Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Don't skip — fail loudly on reused versions (recommended)
+          packages-dir: sdx-client/dist
 
