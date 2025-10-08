@@ -107,15 +107,47 @@ jobs:
       run:
         working-directory: sdx-client
     steps:
-      - uses: actions/download-artifact@v4
+      # Rebuild from source (since we bake SDX_BASE_URL)
+      - uses: actions/checkout@v4
         with:
-          name: dist-${{ github.ref_name }}
-          path: sdx-client/dist
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Ensure tags are present
+        run: git fetch --force --tags
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # Validate artifact version from filenames (no git required here)
+      - name: Install build tools
+        run: python -m pip install --upgrade build setuptools_scm
+
+      - name: Inject scm pretend version for tag builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Clean dist
+        run: rm -rf dist/*
+
+      # Bake only SDX_BASE_URL for TestPyPI
+      - name: Bake SDX_BASE_URL for TestPyPI
+        run: |
+          python - <<'PY'
+          import pathlib
+          val = "https://190.103.184.194"  # Test controller endpoint
+          p = pathlib.Path("sdxclient/config.py")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(f"# Auto-generated for TestPyPI build\nSDX_BASE_URL = '{val}'\n")
+          print("Baked SDX_BASE_URL:", val)
+          PY
+
+      # Build new package with baked config
+      - name: Build sdist and wheel
+        run: python -m build
+
+      #  Validate version (still necessary!)
       - name: Ensure pre-release/dev version (TestPyPI)
         run: |
           cd dist
@@ -129,20 +161,7 @@ jobs:
             exit 1
           fi
 
-      # Bake only SDX_BASE_URL for TestPyPI
-      - name: Bake SDX_BASE_URL for TestPyPI
-        run: |
-          python - <<'PY'
-          import pathlib
-          val = "https://190.103.184.194"  # Test controller endpoint
-          p = pathlib.Path("sdxclient/config.py")
-          p.write_text(f"# Auto-generated for TestPyPI build\nSDX_BASE_URL = '{val}'\n")
-          print("Baked SDX_BASE_URL:", val)
-          PY
-
-      - name: Build package
-        run: python -m build
-
+      #  Publish to TestPyPI
       - name: Publish to TestPyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
