@@ -296,6 +296,13 @@ git push origin v0.10.1
 
 ### → publishes to PyPI with version 0.10.1.
 
+## Delete tag to reissue it
+
+```bash
+git tag -d v0.10.2
+git push origin :refs/tags/v0.10.2
+```
+
 # Test Builds (TestPyPI)
 
 - Trigger:
