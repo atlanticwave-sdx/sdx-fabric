@@ -1,9 +1,11 @@
-import os
-def get_base_url():
-    sdx_base_url = os.getenv("SDX_BASE_URL")
-    if not sdx_base_url:
-        raise EnvironmentError("SDX_BASE_URL is not defined.")
-    return sdx_base_url
-# optional back-compat:
-BASE_URL = get_base_url()
+# sdxclient/config.py
+"""
+Configuration for SDXClient.
+
+This file may be auto-rewritten during GitHub Actions builds.
+- On TestPyPI builds → baked with SDX_BASE_URL = 'https://190.103.184.194'
+- On PyPI (production) → remains as committed below.
+"""
+
+SDX_BASE_URL = "https://sdxapi.atlanticwave-sdx.ai"
 
