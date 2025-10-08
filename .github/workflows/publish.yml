@@ -2,35 +2,28 @@ name: Build & Publish (TestPyPI → PyPI)
 
 on:
   push:
-    branches: ["main"]              # publish to TestPyPI on merge to main
-    tags:
-      - "v*.*.*"                    # publish to PyPI on version tags
+    branches: ["main"]
+    tags: ["v*.*.*"]
   pull_request:
-    branches: ["main"]              # build-only on PRs targeting main
-  workflow_dispatch:                 # manual trigger from Actions tab
+    branches: ["main"]
+  workflow_dispatch:
     inputs:
       target:
         description: "Choose where to publish"
         required: true
         default: "testpypi"
         type: choice
-        options:
-          - testpypi
-          - pypi
+        options: [testpypi, pypi]
 
 permissions:
-  id-token: write                   # REQUIRED for OIDC Trusted Publishing
+  id-token: write
   contents: read
 
-# -------------------------------------------------------------------------
-# Jobs
-# -------------------------------------------------------------------------
 jobs:
-  # ----------------------------------------------------
-  # Build on pull requests only (no publish)
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
+  # Pull Request Build Only (no publish)
+  # ------------------------------------------------------------
   pr-build:
-    name: Build on pull_request (no publish)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -38,19 +31,30 @@ jobs:
         working-directory: sdx-client
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify git tags
+        run: |
+          git fetch --force --tags
+          git describe --tags --always --dirty || true
+          git tag -l | tail -n 5
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install build tool
-        run: python -m pip install --upgrade build
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build setuptools_scm
+
       - name: Build sdist and wheel
         run: python -m build
 
-  # ----------------------------------------------------
-  # Build artifacts for push/tag/manual
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
+  # Build Package Artifacts
+  # ------------------------------------------------------------
   build:
-    name: Build package artifacts
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -58,29 +62,47 @@ jobs:
         working-directory: sdx-client
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Ensure tags present
+        run: |
+          git fetch --force --tags
+          git describe --tags --always --dirty || true
+          git tag -l | tail -n 10
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install build tool
+
+      - name: Install build dependencies
         run: python -m pip install --upgrade build setuptools_scm
+
+      - name: Inject pretend version for tag builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build sdist and wheel
         run: python -m build
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/*
+          name: dist-${{ github.ref_name }}
+          path: sdx-client/dist/*
+          if-no-files-found: error
 
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
   # Publish to TestPyPI
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
   publish-testpypi:
     name: Publish to TestPyPI
     if: >
       github.event_name != 'pull_request' &&
       (github.ref == 'refs/heads/main' ||
-      (startsWith(github.ref_name, 'v') && contains(github.ref_name, 'rc')) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
+       (startsWith(github.ref_name, 'v') && contains(github.ref_name, 'rc')) ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
@@ -88,57 +110,89 @@ jobs:
         working-directory: sdx-client
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Ensure tags present
+        run: |
+          git fetch --force --tags
+          git describe --tags --always --dirty || true
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install build tool
-        run: python -m pip install --upgrade build
 
-      # 🔹 Bake only SDX_BASE_URL for TestPyPI
+      - name: Install build deps
+        run: python -m pip install --upgrade build setuptools_scm
+
+      - name: Inject pretend version for tag builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # 🔹 Bake Test Base URL into config.py
       - name: Bake SDX_BASE_URL for TestPyPI
         run: |
           python - <<'PY'
           import pathlib
-          val = "https://190.103.184.194"  # Test controller endpoint
-          p = pathlib.Path("sdxclient/config.py")
-          p.write_text(f"# Auto-generated for TestPyPI build\nSDX_BASE_URL = '{val}'\n")
-          print("✅ Baked SDX_BASE_URL:", val)
+          path = pathlib.Path("sdxclient/config.py")
+          test_url = "https://190.103.184.194"
+          path.write_text(f"# Auto-generated during TestPyPI build\nSDX_BASE_URL = '{test_url}'\n")
+          print("Baked SDX_BASE_URL =", test_url)
           PY
 
-      - name: Build package
+      - name: Build (TestPyPI variant)
         run: python -m build
 
-      - name: Publish to TestPyPI (OIDC Trusted Publishing)
+      - name: Publish to TestPyPI (OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
           packages-dir: sdx-client/dist
 
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
   # Publish to PyPI
-  # ----------------------------------------------------
+  # ------------------------------------------------------------
   publish-pypi:
     name: Publish to PyPI
     if: >
       github.event_name != 'pull_request' &&
-      ((startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, 'rc')) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
+      ((startsWith(github.ref_name, 'v') && !contains(github.ref_name, 'rc')) ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi'))
     needs: build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdx-client
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: dist
-          path: dist
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Ensure tags present
+        run: |
+          git fetch --force --tags
+          git describe --tags --always --dirty || true
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Publish to PyPI (OIDC Trusted Publishing)
+
+      - name: Install build deps
+        run: python -m pip install --upgrade build setuptools_scm
+
+      - name: Inject pretend version for tag builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SDXCLIENT=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build (Production)
+        run: python -m build
+
+      - name: Publish to PyPI (OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+          packages-dir: sdx-client/dist
 
