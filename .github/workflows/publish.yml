@@ -107,7 +107,7 @@ jobs:
       run:
         working-directory: sdx-client
     steps:
-      # Rebuild from source (since we bake SDX_BASE_URL)
+      # Rebuild from source (since we bake BASE_URL)
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -131,16 +131,16 @@ jobs:
       - name: Clean dist
         run: rm -rf dist/*
 
-      # Bake only SDX_BASE_URL for TestPyPI
-      - name: Bake SDX_BASE_URL for TestPyPI
+      # Bake only BASE_URL for TestPyPI
+      - name: Bake BASE_URL for TestPyPI
         run: |
           python - <<'PY'
           import pathlib
           val = "https://190.103.184.194"  # Test controller endpoint
           p = pathlib.Path("sdxclient/config.py")
           p.parent.mkdir(parents=True, exist_ok=True)
-          p.write_text(f"# Auto-generated for TestPyPI build\nSDX_BASE_URL = '{val}'\n")
-          print("Baked SDX_BASE_URL:", val)
+          p.write_text(f"# Auto-generated for TestPyPI build\nBASE_URL = '{val}'\n")
+          print("Baked BASE_URL:", val)
           PY
 
       # Build new package with baked config

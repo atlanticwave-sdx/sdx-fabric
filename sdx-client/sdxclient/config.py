@@ -7,5 +7,5 @@ This file may be auto-rewritten during GitHub Actions builds.
 - On PyPI (production) → remains as committed below.
 """
 
-SDX_BASE_URL = "https://sdxapi.atlanticwave-sdx.ai"
+BASE_URL = "https://sdxapi.atlanticwave-sdx.ai"
 
