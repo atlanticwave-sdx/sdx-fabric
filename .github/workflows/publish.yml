@@ -19,9 +19,6 @@ permissions:
   id-token: write                     # OIDC Trusted Publishing
   contents: read
 
-env:
-  TEST_SDX_BASE_URL: https://190.103.184.194
-  PROD_SDX_BASE_URL: https://sdxapi.atlanticwave-sdx.ai
 
 jobs:
   # -------------------------------------------------------------------------
@@ -132,8 +129,19 @@ jobs:
             exit 1
           fi
 
-      - name: Set SDX_BASE_URL for TestPyPI
-        run: echo "SDX_BASE_URL=${TEST_SDX_BASE_URL}" >> "$GITHUB_ENV"
+      # Bake only SDX_BASE_URL for TestPyPI
+      - name: Bake SDX_BASE_URL for TestPyPI
+        run: |
+          python - <<'PY'
+          import pathlib
+          val = "https://190.103.184.194"  # Test controller endpoint
+          p = pathlib.Path("sdxclient/config.py")
+          p.write_text(f"# Auto-generated for TestPyPI build\nSDX_BASE_URL = '{val}'\n")
+          print("Baked SDX_BASE_URL:", val)
+          PY
+
+      - name: Build package
+        run: python -m build
 
       - name: Publish to TestPyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -182,9 +190,6 @@ jobs:
             echo "ERROR: Version must be X.Y.Z (got $VER)"
             exit 1
           fi
-
-      - name: Set SDX_BASE_URL for Production
-        run: echo "SDX_BASE_URL=${PROD_SDX_BASE_URL}" >> "$GITHUB_ENV"
 
       - name: Publish to PyPI (OIDC Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
