@@ -33,6 +33,7 @@ version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
 # If you ever build from an sdist without .git, write the resolved version into the package:
 write_to = "sdxclient/_version.py"
+fallback_version = "0.10.2"
 
 [project.urls]
 Homepage = "https://github.com/atlanticwave-sdx/sdx-fabric"
