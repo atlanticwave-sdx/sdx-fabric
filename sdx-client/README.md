@@ -354,4 +354,4 @@ pip install sdxclient==X.Y.Z
 - Runtime URLs:
 
 - Test: SDX_BASE_URL=https://190.103.184.194
-- Prod: SDX_BASE_URL=https://sdxapi.atlanticwave-sdx.ai
+- Prod: SDX_BASE_URL=https://sdxapi.atlanticwave-sdx.net

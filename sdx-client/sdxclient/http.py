@@ -33,7 +33,7 @@ def _http_request(
     """
     url = f"{base_url}{path}"
     try:
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = dict(session.headers)
         if accept:
             headers["Accept"] = accept
         response = session.request(
