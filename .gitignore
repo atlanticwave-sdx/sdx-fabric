@@ -54,3 +54,4 @@ ENV/
 .ropeproject
 /.idea/
 .idea/
+sdx-client/tests/tokens/*

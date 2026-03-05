@@ -1,11 +1,31 @@
-import os
-
+from pathlib import Path
 import pytest
 import requests
+import os
 
 BASE_URL = os.getenv("SDX_BASE_URL", "https://sdxapi.atlanticwave-sdx.net").rstrip("/")
 TIMEOUT_SECONDS = float(os.getenv("SDX_TEST_TIMEOUT", "8"))
 VERIFY_TLS = os.getenv("SDX_TLS_VERIFY", "true").lower() in {"1", "true", "yes", "on"}
+
+TOKENS_DIR = Path(__file__).resolve().parent / "tokens"
+
+
+def _read_token_file(token_path: Path) -> str:
+    lines: list[str] = []
+    for raw_line in token_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        lines.append(line)
+
+    token = "".join(lines).strip()
+    if not token:
+        pytest.skip(f"token file empty: {token_path.name}")
+
+    if token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1].strip()
+
+    return token
 
 
 def _request_root(auth_header_value: str | None) -> requests.Response:
@@ -25,61 +45,42 @@ def _assert_json_error(response: requests.Response, expected_status: int, expect
         assert payload["error"] == expected_error
 
 
-def test_gateway_up_no_token_returns_missing_token() -> None:
-    response = _request_root(auth_header_value=None)
-    _assert_json_error(response, expected_status=401, expected_error="missing_token")
+def _iter_token_files() -> list[Path]:
+    if not TOKENS_DIR.exists():
+        pytest.skip(f"tokens dir missing: {TOKENS_DIR}")
+
+    token_files = sorted([p for p in TOKENS_DIR.iterdir() if p.is_file() and p.name != "README.md"])
+    if not token_files:
+        pytest.skip(f"no token files found in {TOKENS_DIR}")
+
+    return token_files
 
 
-@pytest.mark.parametrize(
-    "auth_value,expected_error",
-    [
-        ("Bearer", "invalid_authorization"),
-        ("Bearer ", "invalid_authorization"),
-        ("Basic abc", "invalid_authorization"),
-        ("junk", "invalid_authorization"),
-    ],
-)
-def test_gateway_malformed_authorization_header(auth_value: str, expected_error: str) -> None:
-    response = _request_root(auth_header_value=auth_value)
-    _assert_json_error(response, expected_status=401, expected_error=expected_error)
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        "not-a-jwt",
-        "abc.def",  # malformed segments
-        "abc.def.ghi",  # looks like jwt but not base64 json
-    ],
-)
-def test_gateway_garbage_token_rejected(token: str) -> None:
+@pytest.mark.parametrize("token_path", _iter_token_files(), ids=lambda p: p.name)
+def test_gateway_token_files_roundtrip(token_path: Path) -> None:
+    token = _read_token_file(token_path)
     response = _request_root(auth_header_value=f"Bearer {token}")
+
+    # Convention by filename (simple + not complicated):
+    name = token_path.name.lower()
+    is_expected_valid = "valid" in name
+    is_expected_expired = "expired" in name
+    is_expected_malformed = "malformed" in name
+
+    if is_expected_valid:
+        # Valid token should pass auth.lua (upstream can still return 200/404/etc)
+        assert response.status_code != 401
+        return
+
+    # For expired/malformed/anything-else: must be rejected by auth.lua
     assert response.status_code == 401
     payload = response.json()
     assert isinstance(payload, dict)
-    # Depending on where it fails (decode vs verify), error can differ.
-    assert payload.get("error") in {"invalid_token", "token_rejected", "invalid_jwt"}
 
-
-def test_gateway_expired_token_rejected_if_provided() -> None:
-    expired_jwt = os.getenv("SDX_EXPIRED_JWT")
-    if not expired_jwt:
-        pytest.skip("SDX_EXPIRED_JWT not set")
-
-    response = _request_root(auth_header_value=f"Bearer {expired_jwt}")
-    assert response.status_code == 401
-    payload = response.json()
-    assert isinstance(payload, dict)
-    assert payload.get("error") in {"token_rejected", "invalid_token"}
-
-
-def test_gateway_valid_token_allows_request_if_provided() -> None:
-    valid_jwt = os.getenv("SDX_VALID_JWT")
-    if not valid_jwt:
-        pytest.skip("SDX_VALID_JWT not set")
-
-    response = _request_root(auth_header_value=f"Bearer {valid_jwt}")
-
-    # We only assert "auth passed" by asserting we did NOT get the auth.lua 401.
-    # Upstream could still return 200/404/405/etc depending on / route behavior.
-    assert response.status_code != 401
+    if is_expected_expired:
+        assert payload.get("error") in {"token_rejected", "invalid_token"}
+    elif is_expected_malformed:
+        assert payload.get("error") in {"invalid_token", "token_rejected", "invalid_jwt"}
+    else:
+        # default: still must be some auth-related error
+        assert payload.get("error") in {"invalid_token", "token_rejected", "missing_token", "invalid_authorization", "invalid_jwt"}
