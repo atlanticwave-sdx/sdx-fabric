@@ -195,48 +195,14 @@ class SDXClient:
                 "SDXClient rejected: Token lacks email and no email_fallback provided."
             )
 
-        # --- Source Logic ---
-        # If projects or roles exist, it's FABRIC. Otherwise, check OIDC issuers.
-        if claims.get("projects") or claims.get("roles"):
-            login_payload = {
-                "source": "fabric",
-                "fabric_sub": claims.get("sub"),
-                "fabric_iss": claims.get("iss"),
-                "fabric_ownership": claims.get("aud"),
-                "email": final_email,
-                "eppn": claims.get("eppn"),
-                "idp": claims.get("idp"),
-                "idp_name": claims.get("idp_name"),
-            }
-        else:
-            iss = (claims.get("iss") or "").lower()
-            if "cilogon.org" in iss:
-                login_payload = {
-                    "source": "cilogon",
-                    "cilogon_sub": claims.get("sub"),
-                    "cilogon_iss": claims.get("iss"),
-                    "cilogon_ownership": claims.get("aud"),
-                    "email": final_email,
-                    "eppn": claims.get("eppn"),
-                    "idp": claims.get("idp"),
-                    "idp_name": claims.get("idp_name"),
-                }
-            elif "orcid.org" in iss:
-                login_payload = {
-                    "source": "orcid",
-                    "orcid_sub": claims.get("sub"),
-                    "orcid_iss": claims.get("iss"),
-                    "orcid_ownership": claims.get("aud"),
-                    "email": final_email,
-                    "eppn": claims.get("eppn"),
-                    "idp": claims.get("idp"),
-                    "idp_name": claims.get("idp_name"),
-                }
-            else:
-                raise RuntimeError(f"SDXClient Init Failed: Unsupported token source (iss: {iss})")
+        # Normalized login: backend trusts OpenResty headers.
+        # Client only sends fallback email if needed.
+        login_payload = {
+            "email": final_email,
+        }
 
         # 3. Handshake: POST to /login
-        # The Backend (auth.py) uses these values + Lua headers to fill the 6-column triplet.
+        # OpenResty provides trusted identity headers; client only sends fallback email if needed.
         login_resp = _http_request(
             self.session, self.base_url, "POST", "/login", 
             json_body=login_payload, timeout=self.timeout
@@ -255,7 +221,8 @@ class SDXClient:
 
         # 4. Success: Finalize Stateful Identity
         self.user_id = login_resp["data"]["user_id"]
-        self.ownership = claims.get("aud")
+        self.email = final_email
+        self.source_id = login_resp["data"].get("source_id")
 
         # --- L2VPN payload metadata (staged once) ---
         self._l2vpn_name = None
@@ -293,7 +260,6 @@ class SDXClient:
     @_api_guard
     def clear_selection(self) -> Dict[str, Any]:
         self._l2vpn_name = None
-        self._l2vpn_ownership = None
         self._l2vpn_notifications = None
         self._l2vpn_service_id = None
         self._first_endpoint = None
