@@ -1,6 +1,8 @@
 """Stateful thin client (user-facing) aligned with AW-SDX 2.0 Topology Data Model."""
 from typing import Any, Dict, Optional, List, Union
 import requests
+import json
+import jwt  # PyJWT library for decoding JWT tokens
 
 from .config import BASE_URL
 from .fablib_token import _load_fabric_token
@@ -123,16 +125,40 @@ def _token_fully_contained(token: str, available: List[str]) -> bool:
 # SDXClient
 # ---------------------------
 
+def _decode_token_payload(fabric_token):
+    try:
+        # Decode JWT token without verifying the signature (useful for debugging)
+        decoded_token = jwt.decode(fabric_token, options={"verify_signature": False})
+
+        return {
+                "sub": decoded_token.get("sub", None),
+                "iss": decoded_token.get("iss", None),
+                "aud": decoded_token.get("aud", None),
+                "email": decoded_token.get("email", None),
+                "eppn": decoded_token.get("eppn", None),
+                "idp": decoded_token.get("idp", None),
+                "idp_name": decoded_token.get("idp_name", None),
+                "projects": decoded_token.get("projects", None),
+                "roles": decoded_token.get("roles", None),
+            }
+    
+    except json.JSONDecodeError:
+        print("Error: Failed to decode token JSON file!")
+    except jwt.DecodeError:
+        print("Error: Failed to decode JWT token!")
+    except Exception as e:
+        print(f"Unexpected Error: {e}")
+
 class SDXClient:
     """Thin HTTP client for SDX routes with guided endpoint selection."""
-
     def __init__(
         self,
         timeout: float = 6.0,
         *,
         token: Optional[str] = None,
+        email_fallback: Optional[str] = None,
         session: Optional[requests.Session] = None,
-    ) -> None:
+        ) -> None:
         if not BASE_URL:
             raise ValueError("BASE_URL is required")
         self.base_url = BASE_URL.rstrip("/")
@@ -142,27 +168,70 @@ class SDXClient:
         self.session = session or requests.Session()
         self.session.headers.setdefault("Content-Type", "application/json")
 
-        # Authorization: prefer explicitly provided token; else try Fablib; else record error
-        self.auth_error: Optional[str] = None
+        # 1. Resolve Token (Constructor param or Fablib)
         bearer_token = token
         if bearer_token is None:
             token_result = _load_fabric_token()
-            if token_result["status_code"] == 200 and token_result["data"]:
+            if token_result["status_code"] == 200:
                 bearer_token = token_result["data"]
-            else:
-                self.auth_error = token_result["error"] or "unable to load FABRIC token"
+        
+        if not bearer_token:
+            raise RuntimeError("SDXClient Init Failed: No token provided or found.")
 
-        if bearer_token:
-            self.session.headers["Authorization"] = f"Bearer {bearer_token}"
+        self.session.headers["Authorization"] = f"Bearer {bearer_token}"
 
-        # L2VPN payload metadata (staged once)
-        self._l2vpn_name: Optional[str] = None
-        self._l2vpn_ownership: Optional[str] = None
-        self._l2vpn_notifications: Optional[List[Dict[str, str]]] = None
-        self._l2vpn_service_id: Optional[str] = None
-        # Selection state
-        self._first_endpoint: Optional[Dict[str, Any]] = None
-        self._second_endpoint: Optional[Dict[str, Any]] = None
+        # 2. Local Extraction for Validation & Handshake
+        claims = _decode_token_payload(bearer_token)
+        if not claims:
+            raise RuntimeError("SDXClient Init Failed: Unable to decode token payload.")
+
+        # --- Identity Validation (Email) ---
+        token_email = claims.get("email")
+        # Final identity is Token Email > User Fallback
+        final_email = token_email or email_fallback
+
+        if not final_email:
+            raise RuntimeError(
+                "SDXClient rejected: Token lacks email and no email_fallback provided."
+            )
+
+        # Normalized login: backend trusts OpenResty headers.
+        # Client only sends fallback email if needed.
+        login_payload = {
+            "email": final_email,
+        }
+
+        # 3. Handshake: POST to /login
+        # OpenResty provides trusted identity headers; client only sends fallback email if needed.
+        login_resp = _http_request(
+            self.session, self.base_url, "POST", "/login", 
+            json_body=login_payload, timeout=self.timeout
+        )
+
+        print("LOGIN RESPONSE:", login_resp)
+        if login_resp["status_code"] != 200:
+            print("LOGIN RESPONSE:", login_resp)
+            error_msg = (
+                (login_resp.get("data") or {}).get("details")
+                or (login_resp.get("data") or {}).get("message")
+                or login_resp.get("error")
+                or "Unknown error"
+            )
+            raise RuntimeError(f"Handshake failed: {error_msg}")
+
+        # 4. Success: Finalize Stateful Identity
+        self.user_id = login_resp["data"]["user_id"]
+        self.email = final_email
+        self.source_id = login_resp["data"].get("source_id")
+
+        # --- L2VPN payload metadata (staged once) ---
+        self._l2vpn_name = None
+        self._l2vpn_notifications = None
+        self._l2vpn_service_id = None
+        
+        # --- Selection state ---
+        self._first_endpoint = None
+        self._second_endpoint = None
 
     # ---------- Session helpers ----------
     @_api_guard
@@ -191,7 +260,6 @@ class SDXClient:
     @_api_guard
     def clear_selection(self) -> Dict[str, Any]:
         self._l2vpn_name = None
-        self._l2vpn_ownership = None
         self._l2vpn_notifications = None
         self._l2vpn_service_id = None
         self._first_endpoint = None
@@ -561,4 +629,3 @@ class SDXClient:
             self.session, self.base_url, "DELETE", f"/l2vpn/{service_id}",
             accept="application/json", timeout=self.timeout, expect_json=True,
         )
-
